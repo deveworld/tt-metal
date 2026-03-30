@@ -65,6 +65,62 @@ class TestUpdateCache:
         logger.info(output)
         assert eq
 
+    @pytest.mark.parametrize("fill_batch", [2, 8])
+    @pytest.mark.parametrize("batch_offset", [0, 3])
+    def test_fill_cache_batched_input(
+        self,
+        seq_len,
+        head_dim,
+        max_seq_len,
+        num_users,
+        num_heads,
+        in_sharded,
+        input_dtype,
+        fill_batch,
+        batch_offset,
+        device,
+    ):
+        if batch_offset + fill_batch > num_users:
+            pytest.skip("Batched fill range must fit in cache batch size")
+
+        cache_dtype = input_dtype
+        input_shape = [fill_batch, num_heads, seq_len, head_dim]
+        cache_shape = [num_users, num_heads, max_seq_len, head_dim]
+        cache = torch.randn(cache_shape).bfloat16().float()
+        cachett = ttnn.Tensor(cache, cache_dtype).to(ttnn.TILE_LAYOUT).to(device)
+
+        x = torch.randn(input_shape).bfloat16().float()
+        xt = ttnn.Tensor(x, input_dtype).to(ttnn.TILE_LAYOUT)
+        if in_sharded:
+            compute_grid_size = device.compute_with_storage_grid_size()
+            num_cores = min(fill_batch * seq_len // 32 * num_heads, 32)
+            shard_grid = ttnn.num_cores_to_corerangeset(num_cores, compute_grid_size, True)
+            input_shard_spec = ttnn.ShardSpec(
+                shard_grid,
+                [
+                    xt.volume() // xt.padded_shape[-1] // num_cores,
+                    xt.padded_shape[-1],
+                ],
+                ttnn.ShardOrientation.ROW_MAJOR,
+            )
+            input_mem_config = ttnn.MemoryConfig(
+                ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1, input_shard_spec
+            )
+            xt = xt.to(device, input_mem_config)
+        else:
+            xt = xt.to(device)
+
+        cachett = ttnn.fill_cache(cachett, xt, batch_offset)
+        cache[batch_offset : batch_offset + fill_batch, :, : x.shape[-2], :] = x
+
+        tt_got_back = cachett.cpu().to(ttnn.ROW_MAJOR_LAYOUT).to_torch()
+        if input_dtype == ttnn.bfloat16 and cache_dtype == input_dtype:
+            eq, output = comp_equal(cache, tt_got_back)
+        else:
+            eq, output = comp_pcc(cache, tt_got_back)
+        logger.info(output)
+        assert eq
+
     @pytest.mark.parametrize("cache_idx", [0, 1, 127, 1057])
     @pytest.mark.parametrize("cache_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
     @pytest.mark.parametrize(

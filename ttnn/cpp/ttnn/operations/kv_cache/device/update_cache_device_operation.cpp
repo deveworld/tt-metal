@@ -98,9 +98,10 @@ void UpdateKVCacheOperation::validate_on_program_cache_miss(
         }
 
         TT_FATAL(
-            args.batch_idx < cache_tensor.padded_shape()[0],
-            "Batch index ({}) must be less than cache tensor batch size ({})",
+            args.batch_idx + input_tensor.padded_shape()[0] <= cache_tensor.padded_shape()[0],
+            "Batch range [{}:{}) must fit in cache tensor batch size ({})",
             args.batch_idx,
+            args.batch_idx + input_tensor.padded_shape()[0],
             cache_tensor.padded_shape()[0]);
         TT_FATAL(
             input_tensor.padded_shape()[-2] <= cache_tensor.padded_shape()[-2],

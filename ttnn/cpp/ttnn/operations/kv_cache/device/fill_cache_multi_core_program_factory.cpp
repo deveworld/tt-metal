@@ -33,7 +33,9 @@ FillCacheMultiCoreProgramFactory::cached_program_t FillCacheMultiCoreProgramFact
     // For sharded, each core gets shard_shape[0] number of tiles along seq_len.
     // For either case, assume that work doesn't spill over to next head, so we just increment by Wt within
     // reader/writer
-    uint32_t num_blocks_of_work = input_tensor.padded_shape()[1] * input_tensor.padded_shape()[-2] / TILE_HEIGHT;
+    const uint32_t input_batch_size = input_tensor.padded_shape()[0];
+    uint32_t num_blocks_of_work =
+        input_batch_size * input_tensor.padded_shape()[1] * input_tensor.padded_shape()[-2] / TILE_HEIGHT;
 
     uint32_t Wt = cache_tensor.padded_shape()[-1] / TILE_WIDTH;
     uint32_t input_Ht = input_tensor.padded_shape()[-2] / TILE_HEIGHT;  // seq_len
@@ -111,9 +113,13 @@ FillCacheMultiCoreProgramFactory::cached_program_t FillCacheMultiCoreProgramFact
         all_cores,
         tt::tt_metal::ReaderDataMovementConfig(reader_compile_time_args, reader_kernel_defines));
 
+    writer_compile_time_args.insert(
+        writer_compile_time_args.end(),
+        {input_tensor.padded_shape()[1], input_Ht, cache_HtWt, cache_CHtWt, Wt});
+
     tt::tt_metal::KernelHandle unary_writer_kernel_id = tt::tt_metal::CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/eltwise/unary/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp",
+        "ttnn/cpp/ttnn/operations/kv_cache/device/kernels/dataflow/writer_fill_cache_interleaved_start_id.cpp",
         all_cores,
         tt::tt_metal::WriterDataMovementConfig(writer_compile_time_args));
 
@@ -140,18 +146,15 @@ FillCacheMultiCoreProgramFactory::cached_program_t FillCacheMultiCoreProgramFact
                 num_blocks_written * Wt,
             });
 
-        const uint32_t cache_start_id = start_idx                                       // user batch start
-                                        + (num_blocks_written / input_Ht * cache_HtWt)  // cache head offset
-                                        + ((num_blocks_written % input_Ht) * Wt);       // seq_len offset
-
         tt::tt_metal::SetRuntimeArgs(
             program,
             unary_writer_kernel_id,
             core,
             {
                 dst_buffer->address(),
-                num_blocks_per_core * Wt,
-                cache_start_id,
+                num_blocks_written,
+                num_blocks_per_core,
+                start_idx,
             });
         num_blocks_written += num_blocks_per_core;
     }
@@ -222,13 +225,11 @@ void FillCacheMultiCoreProgramFactory::override_runtime_arguments(
         }
 
         {
-            const uint32_t cache_start_id = start_idx                                       // user batch start
-                                            + (num_blocks_written / input_Ht * cache_HtWt)  // cache head offset
-                                            + ((num_blocks_written % input_Ht) * Wt);       // seq_len offset
-
             auto& runtime_args = GetRuntimeArgs(program, unary_writer_kernel_id, core);
             runtime_args[0] = dst_buffer->address();
-            runtime_args[2] = cache_start_id;
+            runtime_args[1] = num_blocks_written;
+            runtime_args[2] = num_blocks_per_core;
+            runtime_args[3] = start_idx;
         }
         num_blocks_written += num_blocks_per_core;
     }
