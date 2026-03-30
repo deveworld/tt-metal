@@ -48,10 +48,6 @@ void UpdateKVCacheOperation::validate_on_program_cache_miss(
         input_tensor.padded_shape()[-1],
         cache_tensor.padded_shape()[-1]);
     TT_FATAL(
-        input_tensor.padded_shape()[0] == 1,
-        "Input tensor batch size must be 1 but got {}",
-        input_tensor.padded_shape()[0]);
-    TT_FATAL(
         input_tensor.padded_shape()[1] == cache_tensor.padded_shape()[1],
         "Input tensor height ({}) must equal cache tensor height ({})",
         input_tensor.padded_shape()[1],
@@ -61,6 +57,10 @@ void UpdateKVCacheOperation::validate_on_program_cache_miss(
         "Cache tensor memory layout must be INTERLEAVED but got {}",
         cache_tensor.memory_config().memory_layout());
     if (args.op_type == UpdateCacheOpType::FILL) {
+        TT_FATAL(
+            input_tensor.padded_shape()[0] >= 1,
+            "Input tensor batch size must be >= 1 but got {}",
+            input_tensor.padded_shape()[0]);
         // TODO: If we want to support mixed precision like decode, we need to add simple compute kernel for conversion
         TT_FATAL(input_tensor.dtype() == cache_tensor.dtype(), "Input and cache tensors must have same dtype!");
 
@@ -109,6 +109,10 @@ void UpdateKVCacheOperation::validate_on_program_cache_miss(
             input_tensor.padded_shape()[-2],
             cache_tensor.padded_shape()[-2]);
     } else if (args.op_type == UpdateCacheOpType::UPDATE) {
+        TT_FATAL(
+            input_tensor.padded_shape()[0] == 1,
+            "Input tensor batch size must be 1 but got {}",
+            input_tensor.padded_shape()[0]);
         if (input_tensor.device()->arch() == tt::ARCH::GRAYSKULL) {
             TT_FATAL(
                 cache_tensor.dtype() == DataType::BFLOAT16,
