@@ -192,8 +192,6 @@ void FillCacheMultiCoreProgramFactory::override_runtime_arguments(
     const auto num_blocks_per_core_group_1 = cached_program.shared_variables.num_blocks_per_core_group_1;
     const auto num_blocks_per_core_group_2 = cached_program.shared_variables.num_blocks_per_core_group_2;
     const auto Wt = cached_program.shared_variables.Wt;
-    const auto input_Ht = cached_program.shared_variables.input_Ht;
-    const auto cache_HtWt = cached_program.shared_variables.cache_HtWt;
     const auto cache_CHtWt = cached_program.shared_variables.cache_CHtWt;
 
     const auto batch_idx = operation_attributes.batch_idx;
