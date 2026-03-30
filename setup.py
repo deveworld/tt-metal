@@ -47,7 +47,15 @@ def get_lib_dir() -> str:
     return libdir
 
 
-BUNDLE_SFPI = False
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.upper() in {"1", "ON", "TRUE", "YES"}
+
+
+BUNDLE_SFPI = env_flag("CIBW_BUNDLE_SFPI", False)
+USE_SYSTEM_SFPI = env_flag("CIBW_USE_SYSTEM_SFPI", True)
 
 
 def expand_patterns(patterns):
@@ -247,7 +255,7 @@ class CMakeBuild(build_ext):
                     "-DTT_UNITY_BUILDS=ON",
                     "-DTT_ENABLE_LIGHT_METAL_TRACE=ON",
                     "-DWITH_PYTHON_BINDINGS=ON",
-                    "-DTT_USE_SYSTEM_SFPI=ON",
+                    f"-DTT_USE_SYSTEM_SFPI={'ON' if USE_SYSTEM_SFPI else 'OFF'}",
                     "-DENABLE_CCACHE=TRUE",
                 ]
 
