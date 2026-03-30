@@ -265,6 +265,20 @@ class CMakeBuild(build_ext):
                         ]
                     )
 
+                # Add LTO flags if enabled
+                if os.environ.get("CIBW_ENABLE_LTO") == "ON":
+                    cmake_args.extend(
+                        [
+                            "-DTT_ENABLE_LTO=ON",
+                        ]
+                    )
+
+                if os.environ.get("CIBW_ENABLE_DISTRIBUTED") == "OFF":
+                    cmake_args.extend(
+                        [
+                            "-DENABLE_DISTRIBUTED=OFF",
+                        ]
+                    )
                 cmake_args.extend(["-S", source_dir])
 
                 subprocess.check_call(cmake_args)
@@ -291,7 +305,14 @@ class CMakeBuild(build_ext):
         subprocess.check_call(["ls", "-hal", "runtime"], cwd=source_dir, env=build_env)
 
         # Copy needed C++ shared libraries and runtime assets into wheel (sfpi, FW etc)
-        lib_patterns = ["_ttnn.so", "_ttnncpp.so", "libtt_metal.so", "libdevice.so", "libtt_stl.so"]
+        lib_patterns = [
+            "_ttnn.so",
+            "_ttnncpp.so",
+            "libtt_metal.so",
+            "libdevice.so",
+            "libtt_stl.so",
+            "libtracy.so*",
+        ]
         runtime_patterns = [
             "hw/**/*",
         ]
