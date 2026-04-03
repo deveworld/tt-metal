@@ -8,15 +8,15 @@ import contextlib
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Dict, TextIO
+from typing import Dict, List, Optional, TextIO, Union
 
 
 @dataclass
 class Field:
     name: str
     type: str
-    struct_idx: int | None
-    array_size_idx: int | None
+    struct_idx: Optional[int]
+    array_size_idx: Optional[int]
 
 
 @dataclass
@@ -240,7 +240,7 @@ class CodeGen:
 
     def emit_field_traits(self, struct: Struct):
         for field_id, field in enumerate(struct.fields):
-            args: List[str | int] = [field.type, field_id]
+            args: List[Union[str, int]] = [field.type, field_id]
             if field.struct_idx is None:
                 scalar_or_struct = "Scalar"
             else:
