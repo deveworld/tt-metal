@@ -394,6 +394,8 @@ class CMakeBuild(build_ext):
         copy_tree_with_patterns(
             source_dir / "runtime", self.build_lib + "/ttnn/runtime", runtime_patterns, runtime_exclude_files
         )
+        if not BUNDLE_SFPI:
+            shutil.rmtree(self.build_lib + "/ttnn/runtime/sfpi", ignore_errors=True)
         copy_tree_with_patterns(source_dir / "ttnn", self.build_lib + "/ttnn", ttnn_patterns)
         copy_tree_with_patterns(source_dir / "ttnn/cpp", self.build_lib + "/ttnn/ttnn/cpp", ttnn_cpp_patterns)
         copy_tree_with_patterns(source_dir / "tt_metal", self.build_lib + "/ttnn/tt_metal", tt_metal_patterns)
