@@ -250,6 +250,8 @@ class CMakeBuild(build_ext):
                     "Ninja",
                     f"-DCMAKE_BUILD_TYPE={build_type}",
                     f"-DCMAKE_INSTALL_PREFIX=build_{build_type}",
+                    f"-DPYTHON_EXECUTABLE={sys.executable}",
+                    f"-DPython3_EXECUTABLE={sys.executable}",
                     "-DBUILD_SHARED_LIBS=ON",
                     "-DTT_INSTALL=ON",
                     "-DTT_UNITY_BUILDS=ON",
