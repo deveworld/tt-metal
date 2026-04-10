@@ -26,7 +26,6 @@ target_sources(
         FILES ${kernels}
     PRIVATE
         ternary_matmul.cpp
-        ternary_matmul_split.cpp
         device/ternary_matmul_device_operation.cpp
         device/ternary_matmul_program_factory.cpp
 )
