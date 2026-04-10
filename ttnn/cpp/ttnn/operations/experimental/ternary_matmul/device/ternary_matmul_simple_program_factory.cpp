@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Simple single-core ternary matmul program factory.
+// Reads packed 2-bit ternary weights, unpacks to bf16, runs dense matmul.
+// Single core only — for correctness validation (Track A).
+
+#include "ternary_matmul_simple_program_factory.hpp"
+
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/math.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
+
+#include "ttnn/operations/cb_utils.hpp"
+
+namespace ttnn::experimental::prim {
+
+using namespace tt::tt_metal;
+using namespace tt::constants;
+
+TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFactory::create(
+    const TernaryMatmulParams& params,
+    const TernaryMatmulInputs& inputs,
+    Tensor& output) {
+
+    const auto& activation = inputs.input_tensor;
+    const auto& packed_weight = inputs.weight_tensor;
+
+    auto* device = activation.device();
+    auto program = CreateProgram();
+
+    // Dimensions
+    auto act_shape = activation.padded_shape();
+    auto out_shape = output.padded_shape();
+    uint32_t M = act_shape[-2];
+    uint32_t K = act_shape[-1];
+    uint32_t N = out_shape[-1];
+    uint32_t Mt = M / TILE_HEIGHT;
+    uint32_t Kt = K / TILE_WIDTH;
+    uint32_t Nt = N / TILE_WIDTH;
+
+    // Single core
+    CoreCoord core = {0, 0};
+    CoreRangeSet core_set({CoreRange(core, core)});
+
+    // Data formats
+    auto act_df = datatype_to_dataformat_converter(activation.dtype());
+    auto out_df = datatype_to_dataformat_converter(output.dtype());
+    uint32_t act_tile_bytes = tile_size(act_df);
+    uint32_t out_tile_bytes = tile_size(out_df);
+    constexpr uint32_t PACKED_TILE_BYTES = 256;  // 32x32 * 2 bits / 8
+
+    // Circular buffers
+    // CB0: activation tiles (bf16)
+    uint32_t cb0_tiles = 2;
+    auto cb0 = CreateCircularBuffer(program, core_set,
+        CircularBufferConfig(cb0_tiles * act_tile_bytes, {{CBIndex::c_0, act_df}})
+            .set_page_size(CBIndex::c_0, act_tile_bytes));
+
+    // CB1: unpacked weight tiles (bf16)
+    uint32_t cb1_tiles = 2;
+    auto cb1 = CreateCircularBuffer(program, core_set,
+        CircularBufferConfig(cb1_tiles * act_tile_bytes, {{CBIndex::c_1, act_df}})
+            .set_page_size(CBIndex::c_1, act_tile_bytes));
+
+    // CB2: scratch for packed data (256 bytes per packed tile)
+    // Use uint32 format — page_size must match packed tile size
+    auto packed_df = tt::DataFormat::RawUInt32;
+    uint32_t cb2_pages = 2;
+    auto cb2 = CreateCircularBuffer(program, core_set,
+        CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{CBIndex::c_2, packed_df}})
+            .set_page_size(CBIndex::c_2, PACKED_TILE_BYTES));
+
+    // CB16: output tiles (bf16)
+    uint32_t cb16_tiles = 2;
+    auto cb16 = CreateCircularBuffer(program, core_set,
+        CircularBufferConfig(cb16_tiles * out_tile_bytes, {{CBIndex::c_16, out_df}})
+            .set_page_size(CBIndex::c_16, out_tile_bytes));
+
+    // === Reader kernel (fused: activation + packed weight) ===
+    auto act_accessor = TensorAccessorArgs(activation);
+    auto packed_accessor = TensorAccessorArgs(packed_weight);
+
+    std::vector<uint32_t> reader_ct_args;
+    auto act_ct = act_accessor.get_compile_time_args();
+    auto packed_ct = packed_accessor.get_compile_time_args();
+    reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+    reader_ct_args.insert(reader_ct_args.end(), packed_ct.begin(), packed_ct.end());
+
+    auto reader_id = CreateKernel(
+        program,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_fused.cpp",
+        core_set,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_1,
+            .noc = NOC::RISCV_1_default,
+            .compile_args = reader_ct_args});
+
+    // Reader runtime args
+    SetRuntimeArgs(program, reader_id, core, {
+        activation.buffer()->address(),
+        packed_weight.buffer()->address(),
+        Kt, Nt, Mt
+    });
+
+    // === Compute kernel (standard blocked matmul) ===
+    auto compute_id = CreateKernel(
+        program,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
+        core_set,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi2,
+            .compile_args = {Mt, Kt, Nt}});
+
+    // === Writer kernel ===
+    auto out_accessor = TensorAccessorArgs(output);
+    std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(CBIndex::c_16)};
+    auto out_ct = out_accessor.get_compile_time_args();
+    writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
+
+    auto writer_id = CreateKernel(
+        program,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out.cpp",
+        core_set,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .compile_args = writer_ct_args});
+
+    // Writer runtime args
+    SetRuntimeArgs(program, writer_id, core, {
+        output.buffer()->address(),
+        Mt, Nt
+    });
+
+    return {std::move(program), {reader_id, compute_id, writer_id, core}};
+}
+
+void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
+    cached_program_t& cached_program,
+    const TernaryMatmulParams& params,
+    const TernaryMatmulInputs& inputs,
+    Tensor& output) {
+
+    auto& program = cached_program.program;
+    auto& shared = cached_program.shared_variables;
+
+    auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id);
+    reader_args[shared.core] = {
+        inputs.input_tensor.buffer()->address(),
+        inputs.weight_tensor.buffer()->address(),
+        // Kt, Nt, Mt unchanged for same shapes
+    };
+
+    auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id);
+    writer_args[shared.core] = {
+        output.buffer()->address(),
+    };
+}
+
+}  // namespace ttnn::experimental::prim

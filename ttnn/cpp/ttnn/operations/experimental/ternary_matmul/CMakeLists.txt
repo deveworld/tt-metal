@@ -28,11 +28,13 @@ target_sources(
         ternary_matmul.cpp
         device/ternary_matmul_device_operation.cpp
         device/ternary_matmul_program_factory.cpp
+        device/ternary_matmul_simple_program_factory.cpp
 )
 
 # Disable unity build for program factory files to avoid symbol collisions
 set_source_files_properties(
     device/ternary_matmul_program_factory.cpp
+    device/ternary_matmul_simple_program_factory.cpp
     PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION
             ON
