@@ -124,7 +124,7 @@ TernaryMatmulProgramFactory::shared_variables_t ternary_matmul_factory_helper_co
     const std::optional<const TernaryMatmulConfig>& config,
     const std::vector<Tensor>& output_tensors,
     const DeviceComputeKernelConfig& compute_kernel_config,
-    std::optional<ttnn::experimental::ccl::TernaryMatmulFusedOpSignaler>& fused_op_signaler,
+    std::optional<ttnn::experimental::ccl::MinimalMatmulFusedOpSignaler>& fused_op_signaler,
     uint32_t N_chunks,
     std::optional<float> fused_ternary_scalar,
     const std::optional<const Tensor>& fused_ternary_input_a,
@@ -853,7 +853,7 @@ TernaryMatmulProgramFactory::shared_variables_t ternary_matmul_factory_helper(
     const std::optional<const TernaryMatmulConfig>& config,
     const Tensor& output_tensor,
     const DeviceComputeKernelConfig& compute_kernel_config,
-    std::optional<ttnn::experimental::ccl::TernaryMatmulFusedOpSignaler>& fused_op_signaler,
+    std::optional<ttnn::experimental::ccl::MinimalMatmulFusedOpSignaler>& fused_op_signaler,
     std::optional<ttnn::experimental::ccl::StridedReduceScatterFusedOpSignaler>& srs_fused_op_signaler) {
     std::vector<Tensor> output_tensors = {output_tensor};
     return ternary_matmul_factory_helper_common(
@@ -878,7 +878,7 @@ TernaryMatmulProgramFactory::cached_program_t TernaryMatmulProgramFactory::creat
     const TernaryMatmulInputs& tensor_args,
     std::vector<Tensor>& tensor_return_value) {
     tt::tt_metal::Program program = tt::tt_metal::CreateProgram();
-    std::optional<ttnn::experimental::ccl::TernaryMatmulFusedOpSignaler> empty_fused_op_signaler;
+    std::optional<ttnn::experimental::ccl::MinimalMatmulFusedOpSignaler> empty_fused_op_signaler;
     std::optional<ttnn::experimental::ccl::StridedReduceScatterFusedOpSignaler> empty_srs_fused_op_signaler;
 
     auto shared_vars = ternary_matmul_factory_helper_common(
