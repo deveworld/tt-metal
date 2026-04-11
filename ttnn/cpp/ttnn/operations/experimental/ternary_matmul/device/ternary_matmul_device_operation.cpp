@@ -104,7 +104,7 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
         // For packed ternary: derive N from packed buffer size and K
         uint32_t Kt = K / TILE_WIDTH;
         TT_FATAL(Kt > 0, "K must be tile-aligned for packed ternary");
-        auto packed_vol = weight_tensor.volume();
+        auto packed_vol = weight_tensor.physical_volume();
         uint32_t Nt = packed_vol / (Kt * 64);
         TT_FATAL(Nt > 0 && packed_vol == Kt * Nt * 64,
             "packed weight volume {} not consistent with Kt={}", packed_vol, Kt);
@@ -263,7 +263,7 @@ TernaryMatmulDeviceOperation::spec_return_value_t TernaryMatmulDeviceOperation::
     if (operation_attributes.use_packed_ternary) {
         uint32_t K = in0_input_tensor_shape[-1];
         uint32_t Kt = K / tt::constants::TILE_WIDTH;
-        auto packed_vol = in1_input_tensor.volume();
+        auto packed_vol = in1_input_tensor.physical_volume();
         uint32_t Nt = packed_vol / (Kt * 64);
         N = Nt * tt::constants::TILE_WIDTH;
     } else {

@@ -138,7 +138,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     cached_program_t& cached_program,
-    const TernaryMatmulParams& params,
+    const TernaryMatmulParams& /*params*/,
     const TernaryMatmulInputs& inputs,
     std::vector<Tensor>& output_tensors) {
 
@@ -153,18 +153,16 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     uint32_t Nt = out_shape[-1] / tt::constants::TILE_WIDTH;
     uint32_t Mt = act_shape[-2] / tt::constants::TILE_HEIGHT;
 
-    auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id);
-    reader_args[shared.core] = {
+    SetRuntimeArgs(program, shared.reader_kernel_id, shared.core, {
         inputs.input_tensor.buffer()->address(),
         inputs.weight_tensor.buffer()->address(),
         Kt, Nt, Mt
-    };
+    });
 
-    auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id);
-    writer_args[shared.core] = {
+    SetRuntimeArgs(program, shared.writer_kernel_id, shared.core, {
         output.buffer()->address(),
         Mt, Nt
-    };
+    });
 }
 
 }  // namespace ttnn::experimental::prim
