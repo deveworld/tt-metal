@@ -74,8 +74,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // CB16: output tiles (bf16)
     uint32_t cb16_tiles = 2;
     auto cb16 = CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::tt::CBIndex::c_16, out_df}})
-            .set_page_size(tt::tt::CBIndex::c_16, out_tile_bytes));
+        CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
+            .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
     // === Reader kernel (fused: activation + packed weight) ===
     auto act_accessor = TensorAccessorArgs(activation);
@@ -114,7 +114,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     // === Writer kernel ===
     auto out_accessor = TensorAccessorArgs(output);
-    std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::tt::CBIndex::c_16)};
+    std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
     auto out_ct = out_accessor.get_compile_time_args();
     writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
 
