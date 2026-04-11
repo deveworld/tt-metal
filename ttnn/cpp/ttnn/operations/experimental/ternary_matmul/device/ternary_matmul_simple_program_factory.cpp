@@ -38,9 +38,26 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Single core
-    CoreCoord core = {0, 0};
-    CoreRangeSet core_set({CoreRange(core, core)});
+    // Multi-core: distribute Nt tiles across first row of compute grid
+    auto device_grid = activation.device()->compute_with_storage_grid_size();
+    uint32_t max_row_cores = device_grid.x;  // already harvesting-aware
+    // Find largest divisor of Nt that fits in one row
+    uint32_t num_cores = 1;
+    for (uint32_t c = std::min(Nt, max_row_cores); c >= 1; --c) {
+        if (Nt % c == 0) { num_cores = c; break; }
+    }
+    uint32_t nt_per_core = Nt / num_cores;
+
+    // Build per-core ranges (each core is its own range for safety)
+    std::set<CoreRange> core_ranges;
+    std::vector<CoreCoord> cores;
+    cores.reserve(num_cores);
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        CoreCoord c = {i, 0};
+        cores.push_back(c);
+        core_ranges.insert(CoreRange(c, c));
+    }
+    CoreRangeSet core_set(core_ranges);
 
     // Data formats
     auto act_df = datatype_to_dataformat_converter(activation.dtype());
@@ -88,19 +105,22 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     auto reader_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_fused.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
             .noc = NOC::RISCV_1_default,
             .compile_args = reader_ct_args});
 
-    // Reader runtime args
-    SetRuntimeArgs(program, reader_id, core, {
-        activation.buffer()->address(),
-        packed_weight.buffer()->address(),
-        Kt, Nt, Mt
-    });
+    // Per-core reader runtime args
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        uint32_t nt_start = i * nt_per_core;
+        SetRuntimeArgs(program, reader_id, cores[i], {
+            activation.buffer()->address(),
+            packed_weight.buffer()->address(),
+            Kt, Nt, Mt, nt_start, nt_per_core
+        });
+    }
 
     // === Compute kernel (standard blocked matmul) ===
     auto compute_id = CreateKernel(
@@ -109,7 +129,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2,
-            .compile_args = {Mt, Kt, Nt}});
+            .compile_args = {Mt, Kt, nt_per_core}});
 
     // === Writer kernel ===
     auto out_accessor = TensorAccessorArgs(*output.buffer());
@@ -119,20 +139,23 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     auto writer_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out_mc.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
             .compile_args = writer_ct_args});
 
-    // Writer runtime args
-    SetRuntimeArgs(program, writer_id, core, {
-        output.buffer()->address(),
-        Mt, Nt
-    });
+    // Per-core writer runtime args
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        uint32_t nt_start = i * nt_per_core;
+        SetRuntimeArgs(program, writer_id, cores[i], {
+            output.buffer()->address(),
+            Mt, Nt, nt_start, nt_per_core
+        });
+    }
 
-    return {std::move(program), {reader_id, compute_id, writer_id, core}};
+    return {std::move(program), {reader_id, compute_id, writer_id, cores[0]}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
@@ -152,16 +175,13 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     uint32_t Nt = out_shape[-1] / tt::constants::TILE_WIDTH;
     uint32_t Mt = act_shape[-2] / tt::constants::TILE_HEIGHT;
 
-    SetRuntimeArgs(program, shared.reader_kernel_id, shared.core, {
-        inputs.input_tensor.buffer()->address(),
-        inputs.weight_tensor.buffer()->address(),
-        Kt, Nt, Mt
-    });
+    // Only update core 0 addresses (program cache reuse keeps same shapes)
+    auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, shared.core);
+    reader_args[0] = inputs.input_tensor.buffer()->address();
+    reader_args[1] = inputs.weight_tensor.buffer()->address();
 
-    SetRuntimeArgs(program, shared.writer_kernel_id, shared.core, {
-        output.buffer()->address(),
-        Mt, Nt
-    });
+    auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, shared.core);
+    writer_args[0] = output.buffer()->address();
 }
 
 }  // namespace ttnn::experimental::prim
