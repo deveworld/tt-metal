@@ -53,13 +53,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Circular buffers
     // CB0: activation tiles (bf16)
     uint32_t cb0_tiles = 2;
-    auto cb0 = CreateCircularBuffer(program, core_set,
+    CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
     // CB1: unpacked weight tiles (bf16)
     uint32_t cb1_tiles = 2;
-    auto cb1 = CreateCircularBuffer(program, core_set,
+    CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
 
@@ -67,13 +67,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Use uint32 format — page_size must match packed tile size
     auto packed_df = tt::DataFormat::RawUInt32;
     uint32_t cb2_pages = 2;
-    auto cb2 = CreateCircularBuffer(program, core_set,
+    CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
 
     // CB16: output tiles (bf16)
     uint32_t cb16_tiles = 2;
-    auto cb16 = CreateCircularBuffer(program, core_set,
+    CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
