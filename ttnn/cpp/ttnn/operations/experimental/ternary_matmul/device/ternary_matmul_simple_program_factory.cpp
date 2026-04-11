@@ -168,13 +168,6 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
 
-    // Recompute dimensions from current tensors
-    auto act_shape = inputs.input_tensor.padded_shape();
-    auto out_shape = output.padded_shape();
-    uint32_t Kt = act_shape[-1] / tt::constants::TILE_WIDTH;
-    uint32_t Nt = out_shape[-1] / tt::constants::TILE_WIDTH;
-    uint32_t Mt = act_shape[-2] / tt::constants::TILE_HEIGHT;
-
     // Only update core 0 addresses (program cache reuse keeps same shapes)
     auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, shared.core);
     reader_args[0] = inputs.input_tensor.buffer()->address();
