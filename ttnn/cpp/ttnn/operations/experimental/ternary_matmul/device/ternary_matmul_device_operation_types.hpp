@@ -34,6 +34,10 @@ struct TernaryMatmulParams {
     DeviceComputeKernelConfig compute_kernel_config;
     int32_t chunks = 1;  // Number of output tensors to split into (default 1 for backward compat)
     int32_t dim = -1;    // Dimension to split along (default -1)
+
+    // Packed ternary weight mode: weight is uint32 ROW_MAJOR with 2-bit packed ternary values.
+    // Selects TernaryMatmulSimpleProgramFactory (single-core, reader unpacks to bf16).
+    bool use_packed_ternary = false;
 };
 
 struct TernaryMatmulInputs {

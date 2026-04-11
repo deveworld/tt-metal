@@ -10,6 +10,7 @@
 #include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ternary_matmul_device_operation_types.hpp"
 #include "ternary_matmul_program_factory.hpp"
+#include "ternary_matmul_simple_program_factory.hpp"
 #include "ttnn/operations/eltwise/unary/common/unary_op_types.hpp"
 #include "ttnn/operations/experimental/ternary_matmul/device/ternary_matmul_device_operation_types.hpp"
 
@@ -21,7 +22,11 @@ struct TernaryMatmulDeviceOperation {
     using spec_return_value_t = std::vector<TensorSpec>;
     using tensor_return_value_t = std::vector<Tensor>;
 
-    using program_factory_t = std::variant<TernaryMatmulProgramFactory>;
+    using program_factory_t = std::variant<TernaryMatmulProgramFactory, TernaryMatmulSimpleProgramFactory>;
+
+    static program_factory_t select_program_factory(
+        const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args);
+
     static void validate_on_program_cache_miss(
         const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args);
 
@@ -64,6 +69,7 @@ std::vector<Tensor> ternary_matmul(
     int32_t dim = -1,
     std::optional<float> fused_ternary_scalar = std::nullopt,
     const std::optional<Tensor>& fused_ternary_input_a = std::nullopt,
-    const std::optional<Tensor>& fused_ternary_input_b = std::nullopt);
+    const std::optional<Tensor>& fused_ternary_input_b = std::nullopt,
+    bool use_packed_ternary = false);
 
 }  // namespace ttnn::prim

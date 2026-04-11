@@ -4,6 +4,7 @@
 
 #include "ternary_matmul_device_operation.hpp"
 #include "ternary_matmul_program_factory.hpp"
+#include "ternary_matmul_simple_program_factory.hpp"
 
 #include <tt-metalium/math.hpp>
 #include <tt-metalium/tt_metal.hpp>
@@ -15,6 +16,15 @@ using namespace tt::constants;
 using namespace tt::tt_metal;
 
 namespace ttnn::experimental::prim {
+
+TernaryMatmulDeviceOperation::program_factory_t TernaryMatmulDeviceOperation::select_program_factory(
+    const operation_attributes_t& operation_attributes, const tensor_args_t& /*tensor_args*/) {
+    if (operation_attributes.use_packed_ternary) {
+        return TernaryMatmulSimpleProgramFactory{};
+    }
+    return TernaryMatmulProgramFactory{};
+}
+
 void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
     const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args) {
     const auto& act_tensor = tensor_args.input_tensor;
@@ -22,6 +32,14 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
     const bool has_bias = tensor_args.bias_tensor.has_value();
     const Tensor* bias_ptr = has_bias ? &tensor_args.bias_tensor.value() : nullptr;
     const auto& config = operation_attributes.config;
+
+    // Packed ternary mode restrictions
+    if (operation_attributes.use_packed_ternary) {
+        TT_FATAL(!has_bias, "packed ternary mode does not support bias");
+        TT_FATAL(!operation_attributes.fused_activation.has_value(), "packed ternary mode does not support fused activation");
+        TT_FATAL(!operation_attributes.fused_ternary_scalar.has_value(), "packed ternary mode does not support fused ternary scalar");
+        TT_FATAL(operation_attributes.chunks == 1, "packed ternary mode requires chunks=1");
+    }
 
     // Basic device/storage checks
     TT_FATAL(
@@ -38,22 +56,34 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(bias_tensor.buffer() != nullptr, "ternary_matmul bias must be allocated in a device buffer");
     }
 
-    // Layout requirements: all inputs must be TILE layout
-    TT_FATAL(
-        act_tensor.layout() == Layout::TILE && weight_tensor.layout() == Layout::TILE,
-        "ternary_matmul requires TILE layout for activation and weight");
+    const bool packed_ternary = operation_attributes.use_packed_ternary;
+
+    // Layout requirements
+    TT_FATAL(act_tensor.layout() == Layout::TILE, "ternary_matmul requires TILE layout for activation");
+    if (packed_ternary) {
+        // Packed ternary weights: uint32 ROW_MAJOR with 2-bit packed values
+        TT_FATAL(
+            weight_tensor.layout() == Layout::ROW_MAJOR,
+            "packed ternary weight must be ROW_MAJOR layout");
+        TT_FATAL(
+            weight_tensor.dtype() == DataType::UINT32,
+            "packed ternary weight must be UINT32 dtype");
+    } else {
+        TT_FATAL(weight_tensor.layout() == Layout::TILE, "ternary_matmul requires TILE layout for weight");
+    }
     if (has_bias) {
         TT_FATAL(bias_ptr->layout() == Layout::TILE, "ternary_matmul requires TILE layout for bias");
     }
 
-    // DType constraints: support BFLOAT16, BFLOAT8_B, BFLOAT4_B and FLOAT32
+    // DType constraints
     auto dtype_supported = [](tt::tt_metal::DataType dt) {
         return dt == DataType::BFLOAT16 || dt == DataType::BFLOAT8_B || dt == DataType::BFLOAT4_B ||
                dt == DataType::FLOAT32;
     };
-    TT_FATAL(
-        dtype_supported(act_tensor.dtype()) && dtype_supported(weight_tensor.dtype()),
-        "ternary_matmul supports only BFLOAT16, BFLOAT8_B, BFLOAT4_B, and FLOAT32 for inputs");
+    TT_FATAL(dtype_supported(act_tensor.dtype()), "ternary_matmul activation must be BFLOAT16, BFLOAT8_B, BFLOAT4_B, or FLOAT32");
+    if (!packed_ternary) {
+        TT_FATAL(dtype_supported(weight_tensor.dtype()), "ternary_matmul weight must be BFLOAT16, BFLOAT8_B, BFLOAT4_B, or FLOAT32");
+    }
 
     // Bias dtype constraint, if present
     if (has_bias) {
@@ -64,20 +94,31 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
 
     // Shape constraints
     const auto& a_logical = act_tensor.logical_shape();
-    const auto& w_logical = weight_tensor.logical_shape();
-    TT_FATAL(a_logical.rank() >= 2 && w_logical.rank() >= 2, "ternary_matmul expects rank >= 2 tensors");
-
-    // Allow upper-dim broadcasting on activation (LHS): activation may have arbitrary upper dims
-    for (int i = 0; i < static_cast<int>(w_logical.rank()) - 2; ++i) {
-        TT_FATAL(w_logical[i] == 1, "ternary_matmul weight must have 1 in all dims < -2");
-    }
+    TT_FATAL(a_logical.rank() >= 2, "ternary_matmul activation expects rank >= 2");
 
     const uint32_t M = a_logical[-2];
     const uint32_t K = a_logical[-1];
-    const uint32_t K_w = w_logical[-2];
-    const uint32_t N = w_logical[-1];
+    uint32_t N;
 
-    TT_FATAL(K == K_w, "ternary_matmul inner dimensions must match, got K={} and K_w={}", K, K_w);
+    if (packed_ternary) {
+        // For packed ternary: derive N from packed buffer size and K
+        uint32_t Kt = K / TILE_WIDTH;
+        TT_FATAL(Kt > 0, "K must be tile-aligned for packed ternary");
+        auto packed_vol = weight_tensor.volume();
+        uint32_t Nt = packed_vol / (Kt * 64);
+        TT_FATAL(Nt > 0 && packed_vol == Kt * Nt * 64,
+            "packed weight volume {} not consistent with Kt={}", packed_vol, Kt);
+        N = Nt * TILE_WIDTH;
+    } else {
+        const auto& w_logical = weight_tensor.logical_shape();
+        TT_FATAL(w_logical.rank() >= 2, "ternary_matmul weight expects rank >= 2");
+        for (int i = 0; i < static_cast<int>(w_logical.rank()) - 2; ++i) {
+            TT_FATAL(w_logical[i] == 1, "ternary_matmul weight must have 1 in all dims < -2");
+        }
+        const uint32_t K_w = w_logical[-2];
+        N = w_logical[-1];
+        TT_FATAL(K == K_w, "ternary_matmul inner dimensions must match, got K={} and K_w={}", K, K_w);
+    }
     TT_FATAL(M > 0 && K > 0 && N > 0, "ternary_matmul dimensions must be positive");
 
     // Validate chunks and dim parameters
@@ -109,15 +150,17 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(b_logical[-1] == N, "ternary_matmul bias last dimension must equal N ({}), got {}", N, b_logical[-1]);
     }
 
-    // Tile alignment checks (implicitly guaranteed by TILE layout, but assert inner two dims are tile-aligned)
+    // Tile alignment checks
     const auto& a_padded = act_tensor.padded_shape();
-    const auto& w_padded = weight_tensor.padded_shape();
     TT_FATAL(
         a_padded[-2] % TILE_HEIGHT == 0 && a_padded[-1] % TILE_WIDTH == 0,
         "ternary_matmul activation must be tile-aligned");
-    TT_FATAL(
-        w_padded[-2] % TILE_HEIGHT == 0 && w_padded[-1] % TILE_WIDTH == 0,
-        "ternary_matmul weight must be tile-aligned");
+    if (!packed_ternary) {
+        const auto& w_padded = weight_tensor.padded_shape();
+        TT_FATAL(
+            w_padded[-2] % TILE_HEIGHT == 0 && w_padded[-1] % TILE_WIDTH == 0,
+            "ternary_matmul weight must be tile-aligned");
+    }
     if (has_bias) {
         const auto& b_padded = bias_ptr->padded_shape();
         TT_FATAL(b_padded[-1] % TILE_WIDTH == 0, "ternary_matmul bias last dimension must be tile-aligned");
@@ -175,8 +218,8 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
             ternary_b_logical[-1]);
     }
 
-    // Config constraints
-    if (config.has_value()) {
+    // Config constraints (not applicable for packed ternary simple factory)
+    if (config.has_value() && !packed_ternary) {
         const auto& cfg = config.value();
         TT_FATAL(cfg.M_block_size > 0 && cfg.K_block_size > 0 && cfg.N_block_size > 0, "Block sizes must be > 0");
         TT_FATAL(cfg.subblock_h > 0 && cfg.subblock_w > 0, "Subblock sizes must be > 0");
@@ -214,9 +257,19 @@ TernaryMatmulDeviceOperation::spec_return_value_t TernaryMatmulDeviceOperation::
     const auto& in0_input_tensor = tensor_args.input_tensor;
     const auto& in1_input_tensor = tensor_args.weight_tensor;
     const auto& in0_input_tensor_shape = in0_input_tensor.logical_shape();
-    const auto& in1_input_tensor_shape = in1_input_tensor.logical_shape();
-    const uint32_t N = in1_input_tensor_shape[-1];
     const int32_t chunks = operation_attributes.chunks;
+
+    uint32_t N;
+    if (operation_attributes.use_packed_ternary) {
+        uint32_t K = in0_input_tensor_shape[-1];
+        uint32_t Kt = K / tt::constants::TILE_WIDTH;
+        auto packed_vol = in1_input_tensor.volume();
+        uint32_t Nt = packed_vol / (Kt * 64);
+        N = Nt * tt::constants::TILE_WIDTH;
+    } else {
+        const auto& in1_input_tensor_shape = in1_input_tensor.logical_shape();
+        N = in1_input_tensor_shape[-1];
+    }
 
     const auto& memory_config = operation_attributes.output_mem_config.value_or(in0_input_tensor.memory_config());
     auto dtype = operation_attributes.output_dtype.value_or(in0_input_tensor.dtype());
@@ -267,7 +320,8 @@ std::vector<Tensor> ternary_matmul(
     int32_t dim,
     std::optional<float> fused_ternary_scalar,
     const std::optional<Tensor>& fused_ternary_input_a,
-    const std::optional<Tensor>& fused_ternary_input_b) {
+    const std::optional<Tensor>& fused_ternary_input_b,
+    bool use_packed_ternary) {
     using OperationType = experimental::prim::TernaryMatmulDeviceOperation;
     const auto arch = input_tensor.device()->arch();
     auto kernel_config_val = init_device_compute_kernel_config(
@@ -288,7 +342,8 @@ std::vector<Tensor> ternary_matmul(
             .fused_ternary_scalar = fused_ternary_scalar,
             .compute_kernel_config = kernel_config_val,
             .chunks = chunks,
-            .dim = dim},
+            .dim = dim,
+            .use_packed_ternary = use_packed_ternary},
         OperationType::tensor_args_t{
             .input_tensor = input_tensor,
             .weight_tensor = weight_tensor,

@@ -20,8 +20,9 @@ using namespace tt::constants;
 TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFactory::create(
     const TernaryMatmulParams& params,
     const TernaryMatmulInputs& inputs,
-    Tensor& output) {
+    std::vector<Tensor>& output_tensors) {
 
+    auto& output = output_tensors.at(0);
     const auto& activation = inputs.input_tensor;
     const auto& packed_weight = inputs.weight_tensor;
 
@@ -139,21 +140,30 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     cached_program_t& cached_program,
     const TernaryMatmulParams& params,
     const TernaryMatmulInputs& inputs,
-    Tensor& output) {
+    std::vector<Tensor>& output_tensors) {
 
+    auto& output = output_tensors.at(0);
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
+
+    // Recompute dimensions from current tensors
+    auto act_shape = inputs.input_tensor.padded_shape();
+    auto out_shape = output.padded_shape();
+    uint32_t Kt = act_shape[-1] / tt::constants::TILE_WIDTH;
+    uint32_t Nt = out_shape[-1] / tt::constants::TILE_WIDTH;
+    uint32_t Mt = act_shape[-2] / tt::constants::TILE_HEIGHT;
 
     auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id);
     reader_args[shared.core] = {
         inputs.input_tensor.buffer()->address(),
         inputs.weight_tensor.buffer()->address(),
-        // Kt, Nt, Mt unchanged for same shapes
+        Kt, Nt, Mt
     };
 
     auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id);
     writer_args[shared.core] = {
         output.buffer()->address(),
+        Mt, Nt
     };
 }
 

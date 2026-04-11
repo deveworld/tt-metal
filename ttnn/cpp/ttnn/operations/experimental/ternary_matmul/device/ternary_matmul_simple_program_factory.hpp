@@ -24,13 +24,13 @@ struct TernaryMatmulSimpleProgramFactory {
     static cached_program_t create(
         const TernaryMatmulParams& params,
         const TernaryMatmulInputs& inputs,
-        Tensor& output);
+        std::vector<Tensor>& output_tensors);
 
     static void override_runtime_arguments(
         cached_program_t& cached_program,
         const TernaryMatmulParams& params,
         const TernaryMatmulInputs& inputs,
-        Tensor& output);
+        std::vector<Tensor>& output_tensors);
 };
 
 }  // namespace ttnn::experimental::prim

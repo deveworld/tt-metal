@@ -29,5 +29,6 @@ ttnn::Tensor ternary_matmul(
     const std::optional<const ttnn::experimental::prim::TernaryMatmulConfig>& config,
     const std::optional<MemoryConfig>& memory_config = std::nullopt,
     std::optional<const DataType> dtype = std::nullopt,
-    std::optional<ttnn::DeviceComputeKernelConfig> compute_kernel_config = std::nullopt);
+    std::optional<ttnn::DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
+    bool use_packed_ternary = false);
 }
