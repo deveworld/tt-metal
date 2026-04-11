@@ -26,7 +26,6 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     const auto& activation = inputs.input_tensor;
     const auto& packed_weight = inputs.weight_tensor;
 
-    auto* device = activation.device();
     auto program = CreateProgram();
 
     // Dimensions
