@@ -78,8 +78,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
     // === Reader kernel (fused: activation + packed weight) ===
-    auto act_accessor = TensorAccessorArgs(activation);
-    auto packed_accessor = TensorAccessorArgs(packed_weight);
+    auto act_accessor = TensorAccessorArgs(*activation.buffer());
+    auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
 
     std::vector<uint32_t> reader_ct_args;
     auto act_ct = act_accessor.get_compile_time_args();
@@ -113,7 +113,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .compile_args = {Mt, Kt, Nt}});
 
     // === Writer kernel ===
-    auto out_accessor = TensorAccessorArgs(output);
+    auto out_accessor = TensorAccessorArgs(*output.buffer());
     std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
     auto out_ct = out_accessor.get_compile_time_args();
     writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
