@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Simple single-core ternary matmul program factory.
+// Multi-core ternary matmul program factory.
 // Reads packed 2-bit ternary weights, unpacks to bf16, runs dense matmul.
-// Single core only — for correctness validation (Track A).
+// Parallelizes over N dimension — each core handles a range of output tiles.
 
 #include "ternary_matmul_simple_program_factory.hpp"
 
@@ -38,48 +38,52 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Single core
-    CoreCoord core = {0, 0};
-    CoreRangeSet core_set({CoreRange(core, core)});
+    // Multi-core: 1 core per N tile (simplest parallelization)
+    auto device_grid = activation.device()->compute_with_storage_grid_size();
+    uint32_t max_cores = device_grid.x * device_grid.y;
+    uint32_t num_cores = std::min(Nt, max_cores);
+    // Each core handles exactly 1 N tile (when num_cores == Nt)
+    // If Nt > max_cores, fall back to ceil(Nt/max_cores) tiles per core
+    uint32_t nt_per_core = (Nt + num_cores - 1) / num_cores;
+    // Adjust num_cores to exact count needed
+    num_cores = (Nt + nt_per_core - 1) / nt_per_core;
+
+    // Build core set as a 1D grid (row-major)
+    std::vector<CoreCoord> cores;
+    cores.reserve(num_cores);
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        cores.push_back({i % device_grid.x, i / device_grid.x});
+    }
+    CoreRangeSet core_set(CoreRange(cores.front(), cores.back()));
 
     // Data formats
     auto act_df = datatype_to_dataformat_converter(activation.dtype());
     auto out_df = datatype_to_dataformat_converter(output.dtype());
     uint32_t act_tile_bytes = tile_size(act_df);
     uint32_t out_tile_bytes = tile_size(out_df);
-    constexpr uint32_t PACKED_TILE_BYTES = 256;  // 32x32 * 2 bits / 8
+    constexpr uint32_t PACKED_TILE_BYTES = 256;
 
-    // Circular buffers
-    // CB0: activation tiles (bf16)
-    uint32_t cb0_tiles = 2;
+    // Circular buffers (same on all cores)
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
+        CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
-
-    // CB1: unpacked weight tiles (bf16)
-    uint32_t cb1_tiles = 2;
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
+        CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
-
-    // CB2: scratch for packed data (256 bytes per packed tile)
-    // Use uint32 format — page_size must match packed tile size
     auto packed_df = tt::DataFormat::RawUInt32;
-    uint32_t cb2_pages = 2;
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
+        CircularBufferConfig(2 * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
-
-    // CB16: output tiles (bf16)
-    uint32_t cb16_tiles = 2;
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
+        CircularBufferConfig(2 * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
-    // === Reader kernel (fused: activation + packed weight) ===
+    // Tensor accessors
     auto act_accessor = TensorAccessorArgs(*activation.buffer());
     auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
+    auto out_accessor = TensorAccessorArgs(*output.buffer());
 
+    // Reader kernel (multi-core version)
     std::vector<uint32_t> reader_ct_args;
     auto act_ct = act_accessor.get_compile_time_args();
     auto packed_ct = packed_accessor.get_compile_time_args();
@@ -88,51 +92,53 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     auto reader_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_fused.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
             .noc = NOC::RISCV_1_default,
             .compile_args = reader_ct_args});
 
-    // Reader runtime args
-    SetRuntimeArgs(program, reader_id, core, {
-        activation.buffer()->address(),
-        packed_weight.buffer()->address(),
-        Kt, Nt, Mt
-    });
-
-    // === Compute kernel (standard blocked matmul) ===
+    // Compute kernel — each core processes nt_per_core output tiles
     auto compute_id = CreateKernel(
         program,
         "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2,
-            .compile_args = {Mt, Kt, Nt}});
+            .compile_args = {Mt, Kt, nt_per_core}});
 
-    // === Writer kernel ===
-    auto out_accessor = TensorAccessorArgs(*output.buffer());
+    // Writer kernel (multi-core version)
     std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
     auto out_ct = out_accessor.get_compile_time_args();
     writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
 
     auto writer_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out_mc.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
             .compile_args = writer_ct_args});
 
-    // Writer runtime args
-    SetRuntimeArgs(program, writer_id, core, {
-        output.buffer()->address(),
-        Mt, Nt
-    });
+    // Set per-core runtime args — each core handles nt_per_core N tiles
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        uint32_t nt_start = i * nt_per_core;
+        uint32_t nt_count = std::min(nt_per_core, Nt - nt_start);
 
-    return {std::move(program), {reader_id, compute_id, writer_id, core}};
+        SetRuntimeArgs(program, reader_id, cores[i], {
+            activation.buffer()->address(),
+            packed_weight.buffer()->address(),
+            Kt, Nt, Mt, nt_start, nt_count
+        });
+        SetRuntimeArgs(program, writer_id, cores[i], {
+            output.buffer()->address(),
+            Mt, Nt, nt_start, nt_count
+        });
+    }
+
+    return {std::move(program), {reader_id, compute_id, writer_id, cores[0]}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
@@ -145,22 +151,21 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
 
-    // Recompute dimensions from current tensors
     auto act_shape = inputs.input_tensor.padded_shape();
     auto out_shape = output.padded_shape();
     uint32_t Kt = act_shape[-1] / tt::constants::TILE_WIDTH;
     uint32_t Nt = out_shape[-1] / tt::constants::TILE_WIDTH;
     uint32_t Mt = act_shape[-2] / tt::constants::TILE_HEIGHT;
 
+    // Update addresses for core 0 (shapes don't change for cached programs)
     SetRuntimeArgs(program, shared.reader_kernel_id, shared.core, {
         inputs.input_tensor.buffer()->address(),
         inputs.weight_tensor.buffer()->address(),
-        Kt, Nt, Mt
+        Kt, Nt, Mt, 0u, Nt  // core 0 gets all tiles in single-use override
     });
-
     SetRuntimeArgs(program, shared.writer_kernel_id, shared.core, {
         output.buffer()->address(),
-        Mt, Nt
+        Mt, Nt, 0u, Nt
     });
 }
 
