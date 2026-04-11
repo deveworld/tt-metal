@@ -38,23 +38,23 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Multi-core: 1 core per N tile (simplest parallelization)
+    // Multi-core: use first row of cores, Nt must divide evenly
     auto device_grid = activation.device()->compute_with_storage_grid_size();
-    uint32_t max_cores = device_grid.x * device_grid.y;
-    uint32_t num_cores = std::min(Nt, max_cores);
-    // Each core handles exactly 1 N tile (when num_cores == Nt)
-    // If Nt > max_cores, fall back to ceil(Nt/max_cores) tiles per core
-    uint32_t nt_per_core = (Nt + num_cores - 1) / num_cores;
-    // Adjust num_cores to exact count needed
-    num_cores = (Nt + nt_per_core - 1) / nt_per_core;
+    uint32_t max_row_cores = device_grid.x;
+    // Find largest divisor of Nt that fits in one row
+    uint32_t num_cores = 1;
+    for (uint32_t c = std::min(Nt, max_row_cores); c >= 1; --c) {
+        if (Nt % c == 0) { num_cores = c; break; }
+    }
+    uint32_t nt_per_core = Nt / num_cores;
 
-    // Build core set as a 1D grid (row-major)
+    // Single-row core range: (0,0) to (num_cores-1, 0)
     std::vector<CoreCoord> cores;
     cores.reserve(num_cores);
     for (uint32_t i = 0; i < num_cores; ++i) {
-        cores.push_back({i % device_grid.x, i / device_grid.x});
+        cores.push_back({i, 0});
     }
-    CoreRangeSet core_set(CoreRange(cores.front(), cores.back()));
+    CoreRangeSet core_set(CoreRange({0, 0}, {num_cores - 1, 0}));
 
     // Data formats
     auto act_df = datatype_to_dataformat_converter(activation.dtype());
