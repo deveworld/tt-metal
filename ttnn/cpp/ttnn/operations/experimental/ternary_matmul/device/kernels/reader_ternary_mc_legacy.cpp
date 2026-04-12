@@ -64,22 +64,18 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cb_s(cb_scratch);
 
-    // Loop order: mt → kt → nt
-    // Activation tile A[mt, kt] is read ONCE per kt, reused across all nt.
-    // This reduces activation DRAM reads by nt_count×.
+    // Legacy loop order: mt → nt → kt (activation re-read per N tile)
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        for (uint32_t kt = 0; kt < Kt; ++kt) {
-            // Read activation tile A[mt, kt] — read ONCE
-            uint32_t act_tile_id = mt * Kt + kt;
-            cb0.reserve_back(1);
-            noc.async_read(act_tensor, cb0, act_page_bytes,
-                           {.page_id = act_tile_id}, {.offset_bytes = 0});
-            noc.async_read_barrier();
-            cb0.push_back(1);
-
-            // For each N tile: read and unpack weight, then compute reuses act
-            for (uint32_t nc = 0; nc < nt_count; ++nc) {
-                uint32_t nt = nt_start + nc;
+        for (uint32_t nc = 0; nc < nt_count; ++nc) {
+            uint32_t nt = nt_start + nc;
+            for (uint32_t kt = 0; kt < Kt; ++kt) {
+                // Read activation tile A[mt, kt]
+                uint32_t act_tile_id = mt * Kt + kt;
+                cb0.reserve_back(1);
+                noc.async_read(act_tensor, cb0, act_page_bytes,
+                               {.page_id = act_tile_id}, {.offset_bytes = 0});
+                noc.async_read_barrier();
+                cb0.push_back(1);
 
                 // Read packed weight tile B[kt, nt]
                 uint32_t w_tile_id = kt * Nt + nt;

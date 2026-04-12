@@ -2,13 +2,14 @@
 //
 // ternary_mm_compute.cpp — Blocked matmul compute kernel for ternary weights.
 //
-// By the time data reaches this kernel, both inputs are ordinary bfloat16 tiles
-// (the reader kernel handles 2-bit → bfloat16 unpacking).
+// Loop order: mt → kt → nt (matches reader)
+// Uses dest[0..Nt-1] to accumulate N tiles across K dimension.
+// Activation tile is consumed once per kt (shared across all nt).
 //
 // Compile-time args:
 //   arg 0: Mt — number of M-dimension tile rows
 //   arg 1: Kt — number of K-dimension tiles (inner dimension)
-//   arg 2: Nt — number of N-dimension tile columns
+//   arg 2: Nt — number of N-dimension tile columns (per core)
 
 #include <cstdint>
 
@@ -31,27 +32,32 @@ void kernel_main() {
     mm_init(cb_in0, cb_in1, cb_out);
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        for (uint32_t nt = 0; nt < Nt; ++nt) {
-            tile_regs_acquire();
+        // Accumulate all K tiles into dest[0..Nt-1]
+        tile_regs_acquire();
 
-            for (uint32_t kt = 0; kt < Kt; ++kt) {
-                cb_wait_front(cb_in0, 1);
+        for (uint32_t kt = 0; kt < Kt; ++kt) {
+            // One activation tile, consumed by all Nt weight tiles
+            cb_wait_front(cb_in0, 1);
+
+            for (uint32_t nt = 0; nt < Nt; ++nt) {
                 cb_wait_front(cb_in1, 1);
-
-                matmul_tiles(cb_in0, cb_in1, 0, 0, 0);
-
-                cb_pop_front(cb_in0, 1);
+                matmul_tiles(cb_in0, cb_in1, 0, 0, nt);
                 cb_pop_front(cb_in1, 1);
             }
 
-            tile_regs_commit();
-            tile_regs_wait();
-
-            cb_reserve_back(cb_out, 1);
-            pack_tile(0, cb_out);
-            cb_push_back(cb_out, 1);
-
-            tile_regs_release();
+            cb_pop_front(cb_in0, 1);
         }
+
+        // Pack all Nt output tiles
+        tile_regs_commit();
+        tile_regs_wait();
+
+        for (uint32_t nt = 0; nt < Nt; ++nt) {
+            cb_reserve_back(cb_out, 1);
+            pack_tile(nt, cb_out);
+            cb_push_back(cb_out, 1);
+        }
+
+        tile_regs_release();
     }
 }

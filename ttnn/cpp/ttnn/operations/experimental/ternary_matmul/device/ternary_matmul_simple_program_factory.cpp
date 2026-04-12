@@ -38,15 +38,19 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Multi-core: distribute Nt tiles across first row of compute grid
+    // Multi-core: distribute Nt tiles across first row of compute grid.
+    // With optimized loop order (mt→kt→nt), nt_per_core must be ≤ 8
+    // (half-sync dest register limit). If not achievable, use legacy order.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_row_cores = device_grid.x;  // already harvesting-aware
-    // Find largest divisor of Nt that fits in one row
+    constexpr uint32_t MAX_NT_PER_CORE = 8;  // dest register constraint
     uint32_t num_cores = 1;
     for (uint32_t c = std::min(Nt, max_row_cores); c >= 1; --c) {
         if (Nt % c == 0) { num_cores = c; break; }
     }
     uint32_t nt_per_core = Nt / num_cores;
+    // Use optimized loop order when nt_per_core fits in dest registers
+    bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -103,9 +107,17 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
     reader_ct_args.insert(reader_ct_args.end(), packed_ct.begin(), packed_ct.end());
 
+    // Select reader/compute kernels based on loop order
+    const char* reader_kernel = use_fast_loop
+        ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp"
+        : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc_legacy.cpp";
+    const char* compute_kernel = use_fast_loop
+        ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp"
+        : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute_legacy.cpp";
+
     auto reader_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp",
+        reader_kernel,
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
@@ -122,10 +134,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         });
     }
 
-    // === Compute kernel (standard blocked matmul) ===
+    // === Compute kernel ===
     auto compute_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
+        compute_kernel,
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2,
