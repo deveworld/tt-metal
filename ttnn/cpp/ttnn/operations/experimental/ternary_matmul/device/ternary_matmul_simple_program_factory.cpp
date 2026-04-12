@@ -129,6 +129,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core}});
 
     // === Writer kernel ===
