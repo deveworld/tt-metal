@@ -16,7 +16,7 @@ struct TernaryMatmulSimpleProgramFactory {
         tt::tt_metal::KernelHandle reader_kernel_id;
         tt::tt_metal::KernelHandle compute_kernel_id;
         tt::tt_metal::KernelHandle writer_kernel_id;
-        CoreCoord core;
+        std::vector<CoreCoord> cores;
     };
 
     using cached_program_t = ttnn::device_operation::CachedProgram<shared_variables_t>;

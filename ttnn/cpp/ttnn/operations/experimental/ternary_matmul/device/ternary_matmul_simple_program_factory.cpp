@@ -156,7 +156,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         });
     }
 
-    return {std::move(program), {reader_id, compute_id, writer_id, cores[0]}};
+    return {std::move(program), {reader_id, compute_id, writer_id, cores}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
@@ -169,13 +169,15 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
 
-    // Only update core 0 addresses (program cache reuse keeps same shapes)
-    auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, shared.core);
-    reader_args[0] = inputs.input_tensor.buffer()->address();
-    reader_args[1] = inputs.weight_tensor.buffer()->address();
+    // Update ALL cores' buffer addresses for program cache reuse
+    for (const auto& core : shared.cores) {
+        auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, core);
+        reader_args[0] = inputs.input_tensor.buffer()->address();
+        reader_args[1] = inputs.weight_tensor.buffer()->address();
 
-    auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, shared.core);
-    writer_args[0] = output.buffer()->address();
+        auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, core);
+        writer_args[0] = output.buffer()->address();
+    }
 }
 
 }  // namespace ttnn::experimental::prim
