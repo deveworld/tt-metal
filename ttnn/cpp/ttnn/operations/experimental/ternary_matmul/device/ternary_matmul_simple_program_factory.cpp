@@ -42,10 +42,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // With optimized loop order (mt→kt→nt), nt_per_core must be ≤ 8
     // (half-sync dest register limit). If not achievable, use legacy order.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
-    uint32_t max_row_cores = device_grid.x;  // already harvesting-aware
+    uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;  // dest register constraint
     uint32_t num_cores = 1;
-    for (uint32_t c = std::min(Nt, max_row_cores); c >= 1; --c) {
+    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
         if (Nt % c == 0) { num_cores = c; break; }
     }
     uint32_t nt_per_core = Nt / num_cores;
@@ -57,7 +57,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     std::vector<CoreCoord> cores;
     cores.reserve(num_cores);
     for (uint32_t i = 0; i < num_cores; ++i) {
-        CoreCoord c = {i, 0};
+        CoreCoord c = {i % device_grid.x, i / device_grid.x};
         cores.push_back(c);
         core_ranges.insert(CoreRange(c, c));
     }
