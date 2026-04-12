@@ -1,19 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // reader_ternary_mc_legacy.cpp - Legacy loop order (mt→nt→kt) with activation
-// caching: reads all Kt activation tiles ONCE into L1 cache per M-row, then
-// reuses the cache for each N tile.
+// L1 caching. Reads Kt activation tiles ONCE per M-row into CB3 cache,
+// then copies from cache to CB0 for each N-tile reuse.
 //
-// Activation DRAM reads: Kt per mt (instead of Kt × nt_count).
-// For gate_up with Kt=80, nt_count=48: reads 80 vs 3840 tiles from DRAM.
-//
-// Runtime args:
-//   0: act_addr      - DRAM address of activation tensor
-//   1: packed_addr   - DRAM address of packed weight tensor
-//   2: Kt            - total K tiles
-//   3: Nt            - total N tiles (for weight tile indexing)
-//   4: Mt            - total M tiles
-//   5: nt_start      - first N tile for this core
-//   6: nt_count      - number of N tiles for this core
+// DRAM reads reduced from Kt × nt_count to Kt per M-row (nt_count× savings).
 
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
@@ -38,6 +28,16 @@ inline void unpack_byte(uint8_t packed, uint16_t* dst) {
     dst[3] = LUT[packed & 0x03];
 }
 
+// Fast L1-to-L1 word-aligned copy
+inline void l1_copy(uint32_t dst_addr, uint32_t src_addr, uint32_t bytes) {
+    volatile uint32_t* d = reinterpret_cast<volatile uint32_t*>(dst_addr);
+    volatile uint32_t* s = reinterpret_cast<volatile uint32_t*>(src_addr);
+    uint32_t words = bytes >> 2;
+    for (uint32_t i = 0; i < words; ++i) {
+        d[i] = s[i];
+    }
+}
+
 void kernel_main() {
     uint32_t act_addr    = get_arg_val<uint32_t>(0);
     uint32_t packed_addr = get_arg_val<uint32_t>(1);
@@ -50,10 +50,10 @@ void kernel_main() {
     constexpr auto act_accessor_args = TensorAccessorArgs<0>();
     constexpr auto packed_accessor_args = TensorAccessorArgs<2>();
 
-    constexpr uint32_t cb_in0     = 0;  // activation → compute
-    constexpr uint32_t cb_in1     = 1;  // unpacked weight → compute
-    constexpr uint32_t cb_scratch = 2;  // packed weight scratch
-    constexpr uint32_t cb_act_cache = 3; // activation L1 cache
+    constexpr uint32_t cb_in0     = 0;
+    constexpr uint32_t cb_in1     = 1;
+    constexpr uint32_t cb_scratch = 2;
+    constexpr uint32_t cb_act_cache = 3;
 
     const uint32_t act_page_bytes = get_local_cb_interface(cb_in0).fifo_page_size;
     const uint32_t scratch_page_bytes = get_local_cb_interface(cb_scratch).fifo_page_size;
@@ -65,34 +65,39 @@ void kernel_main() {
     experimental::CircularBuffer cb0(cb_in0);
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cb_s(cb_scratch);
-    experimental::CircularBuffer cb_cache(cb_act_cache);
 
-    // Get the L1 base address of the activation cache CB.
-    // We use this CB as a raw L1 buffer: fill it once, then read by offset.
-    // reserve_back(Kt) marks the entire buffer as allocated.
-    cb_cache.reserve_back(Kt);
+    // Get cache base address (CB3 is pre-reserved as raw L1 buffer)
+    // CB3 has Kt pages of act_page_bytes. We use fifo_wr_ptr as base.
     uint32_t cache_base = get_local_cb_interface(cb_act_cache).fifo_wr_ptr;
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        // Phase 1: Read ALL Kt activation tiles into L1 cache (pipelined reads)
+        // Phase 1: Read ALL Kt activation tiles from DRAM into L1 cache.
+        // Use cb0 as intermediate: DRAM → cb0 → cache (L1 copy).
         for (uint32_t kt = 0; kt < Kt; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
-            uint32_t cache_addr = cache_base + kt * act_page_bytes;
-            noc.async_read(act_tensor, cache_addr, act_page_bytes,
+            cb0.reserve_back(1);
+            noc.async_read(act_tensor, cb0, act_page_bytes,
                            {.page_id = act_tile_id}, {.offset_bytes = 0});
-        }
-        noc.async_read_barrier();  // Wait for ALL reads to complete
+            noc.async_read_barrier();
+            cb0.push_back(1);
 
-        // Phase 2: For each (nt, kt), reuse cached activation + read weight
+            // Copy from cb0 to cache
+            cb0.wait_front(1);
+            uint32_t src = get_local_cb_interface(cb_in0).fifo_rd_ptr;
+            uint32_t dst = cache_base + kt * act_page_bytes;
+            l1_copy(dst, src, act_page_bytes);
+            cb0.pop_front(1);
+        }
+
+        // Phase 2: For each N-tile, reuse cached activation tiles
         for (uint32_t nc = 0; nc < nt_count; ++nc) {
             uint32_t nt = nt_start + nc;
             for (uint32_t kt = 0; kt < Kt; ++kt) {
-                // Copy cached activation to cb_in0 (L1→L1 via NoC)
+                // Copy cached activation to cb_in0 (L1→L1)
                 cb0.reserve_back(1);
-                uint32_t src_addr = cache_base + kt * act_page_bytes;
-                uint32_t dst_addr = get_local_cb_interface(cb_in0).fifo_wr_ptr;
-                noc_async_read(get_noc_addr(src_addr), dst_addr, act_page_bytes);
-                noc_async_read_barrier();
+                uint32_t src = cache_base + kt * act_page_bytes;
+                uint32_t dst = get_local_cb_interface(cb_in0).fifo_wr_ptr;
+                l1_copy(dst, src, act_page_bytes);
                 cb0.push_back(1);
 
                 // Read packed weight tile B[kt, nt] from DRAM
@@ -108,11 +113,11 @@ void kernel_main() {
                 cb1.reserve_back(1);
                 uint32_t l1_scratch_rd = get_local_cb_interface(cb_scratch).fifo_rd_ptr;
                 uint32_t l1_weight = get_local_cb_interface(cb_in1).fifo_wr_ptr;
-                const uint8_t* src = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
-                uint16_t* dst = reinterpret_cast<uint16_t*>(l1_weight);
+                const uint8_t* wsrc = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
+                uint16_t* wdst = reinterpret_cast<uint16_t*>(l1_weight);
 
                 for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
-                    unpack_byte(src[i], &dst[i * 4]);
+                    unpack_byte(wsrc[i], &wdst[i * 4]);
                 }
 
                 cb_s.pop_front(1);
