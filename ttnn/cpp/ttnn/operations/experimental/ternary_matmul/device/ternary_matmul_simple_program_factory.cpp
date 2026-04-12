@@ -128,7 +128,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
         core_set,
         ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi4,
+            .math_fidelity = MathFidelity::HiFi2,
             .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core}});
 
