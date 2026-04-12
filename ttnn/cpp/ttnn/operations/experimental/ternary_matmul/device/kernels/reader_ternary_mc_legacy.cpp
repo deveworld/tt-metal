@@ -28,14 +28,10 @@ inline void unpack_byte(uint8_t packed, uint16_t* dst) {
     dst[3] = LUT[packed & 0x03];
 }
 
-// Fast L1-to-L1 word-aligned copy
-inline void l1_copy(uint32_t dst_addr, uint32_t src_addr, uint32_t bytes) {
-    volatile uint32_t* d = reinterpret_cast<volatile uint32_t*>(dst_addr);
-    volatile uint32_t* s = reinterpret_cast<volatile uint32_t*>(src_addr);
-    uint32_t words = bytes >> 2;
-    for (uint32_t i = 0; i < words; ++i) {
-        d[i] = s[i];
-    }
+// L1-to-L1 copy via NoC DMA (hardware transfer, much faster than SW memcpy)
+inline void l1_noc_copy(uint32_t dst_l1, uint32_t src_l1, uint32_t bytes) {
+    uint64_t src_noc = get_noc_addr(src_l1);
+    noc_async_read(src_noc, dst_l1, bytes);
 }
 
 void kernel_main() {
@@ -85,7 +81,8 @@ void kernel_main() {
             cb0.wait_front(1);
             uint32_t src = get_local_cb_interface(cb_in0).fifo_rd_ptr;
             uint32_t dst = cache_base + kt * act_page_bytes;
-            l1_copy(dst, src, act_page_bytes);
+            l1_noc_copy(dst, src, act_page_bytes);
+            noc_async_read_barrier();
             cb0.pop_front(1);
         }
 
@@ -93,19 +90,19 @@ void kernel_main() {
         for (uint32_t nc = 0; nc < nt_count; ++nc) {
             uint32_t nt = nt_start + nc;
             for (uint32_t kt = 0; kt < Kt; ++kt) {
-                // Copy cached activation to cb_in0 (L1→L1)
+                // Issue both reads in parallel: cache→cb0 + DRAM→scratch
                 cb0.reserve_back(1);
-                uint32_t src = cache_base + kt * act_page_bytes;
-                uint32_t dst = get_local_cb_interface(cb_in0).fifo_wr_ptr;
-                l1_copy(dst, src, act_page_bytes);
-                cb0.push_back(1);
+                uint32_t src_cache = cache_base + kt * act_page_bytes;
+                uint32_t dst_cb0 = get_local_cb_interface(cb_in0).fifo_wr_ptr;
+                l1_noc_copy(dst_cb0, src_cache, act_page_bytes);
 
-                // Read packed weight tile B[kt, nt] from DRAM
                 uint32_t w_tile_id = kt * Nt + nt;
                 cb_s.reserve_back(1);
                 noc.async_read(packed_tensor, cb_s, scratch_page_bytes,
                                {.page_id = w_tile_id}, {.offset_bytes = 0});
-                noc.async_read_barrier();
+
+                noc_async_read_barrier();  // Wait for BOTH transfers
+                cb0.push_back(1);
                 cb_s.push_back(1);
 
                 // Unpack packed data → bf16 tile
