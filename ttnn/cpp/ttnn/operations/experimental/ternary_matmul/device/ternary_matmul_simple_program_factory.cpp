@@ -91,6 +91,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
 
+    // CB3: activation L1 cache for legacy reader (holds all Kt tiles)
+    // Only needed for legacy loop; fast loop reads act once via CB0.
+    if (!use_fast_loop) {
+        uint32_t cb3_tiles = Kt;
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(cb3_tiles * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
+                .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
+    }
+
     // CB16: output tiles (bf16)
     uint32_t cb16_tiles = 2;
     CreateCircularBuffer(program, core_set,
