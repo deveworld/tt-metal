@@ -116,66 +116,55 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
-    // === Reader kernel (fused: activation + packed weight) ===
+    // === Reader (NCRISC, NOC_1): activation reads only ===
     auto act_accessor = TensorAccessorArgs(*activation.buffer());
     auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
+    auto out_accessor = TensorAccessorArgs(*output.buffer());
 
     std::vector<uint32_t> reader_ct_args;
-    auto act_ct = act_accessor.get_compile_time_args();
-    auto packed_ct = packed_accessor.get_compile_time_args();
-    reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
-    reader_ct_args.insert(reader_ct_args.end(), packed_ct.begin(), packed_ct.end());
-
-    // Select reader/compute kernels based on loop order
-    const char* reader_kernel = use_fast_loop
-        ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp"
-        : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc_legacy.cpp";
-    const char* compute_kernel = use_fast_loop
-        ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp"
-        : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute_legacy.cpp";
+    {
+        auto act_ct = act_accessor.get_compile_time_args();
+        reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+    }
 
     auto reader_id = CreateKernel(
         program,
-        reader_kernel,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
             .noc = NOC::RISCV_1_default,
             .compile_args = reader_ct_args});
 
-    // Per-core reader runtime args.
     for (uint32_t i = 0; i < num_cores; ++i) {
-        uint32_t nt_start = i * nt_per_core;
         SetRuntimeArgs(program, reader_id, cores[i], {
             activation.buffer()->address(),
-            packed_weight.buffer()->address(),
-            Kt, Nt, Mt, nt_start, nt_per_core, in0_block_w
+            Kt, Mt, in0_block_w
         });
     }
 
     // === Compute kernel ===
-    // LoFi is safe here: the weight side is Bfp2_b with shared exp=0, so every
-    // weight tile has values in exactly {-1, 0, +1} which survive any mantissa
-    // rounding. fp32 dest accumulation preserves precision across long K.
     auto compute_id = CreateKernel(
         program,
-        compute_kernel,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::LoFi,
             .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
-    // === Writer kernel ===
-    // With hardware bfp2 unpack, writer has no unpack role — pure output DMA.
-    auto out_accessor = TensorAccessorArgs(*output.buffer());
+    // === Writer (BRISC, NOC_0): weight reads + output writes ===
     std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
-    auto out_ct = out_accessor.get_compile_time_args();
-    writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
+    {
+        auto packed_ct = packed_accessor.get_compile_time_args();
+        auto out_ct = out_accessor.get_compile_time_args();
+        writer_ct_args.insert(writer_ct_args.end(), packed_ct.begin(), packed_ct.end());
+        writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
+    }
 
     auto writer_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out_mc.cpp",
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_ternary_weight_out.cpp",
         core_set,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
@@ -186,7 +175,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         uint32_t nt_start = i * nt_per_core;
         SetRuntimeArgs(program, writer_id, cores[i], {
             output.buffer()->address(),
-            Mt, Nt, nt_start, nt_per_core
+            packed_weight.buffer()->address(),
+            Kt, Nt, Mt, nt_start, nt_per_core, in0_block_w
         });
     }
 
@@ -203,14 +193,16 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
 
-    // Update ALL cores' buffer addresses for program cache reuse
+    // Update ALL cores' buffer addresses for program cache reuse.
+    // Reader (NCRISC): only the activation address.
+    // Writer (BRISC): output address + weight address.
     for (const auto& core : shared.cores) {
         auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, core);
         reader_args[0] = inputs.input_tensor.buffer()->address();
-        reader_args[1] = inputs.weight_tensor.buffer()->address();
 
         auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, core);
         writer_args[0] = output.buffer()->address();
+        writer_args[1] = inputs.weight_tensor.buffer()->address();
     }
 }
 
