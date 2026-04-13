@@ -30,6 +30,8 @@
 #include "experimental/circular_buffer.h"
 #include "experimental/noc_semaphore.h"
 #include "experimental/tensor.h"
+#include "experimental/endpoints.h"
+#include "experimental/core_local_mem.h"
 
 void kernel_main() {
     uint32_t act_addr             = get_arg_val<uint32_t>(0);
@@ -97,18 +99,25 @@ void kernel_main() {
         // (skip entirely when there are no receivers).
         if (num_receivers > 0) {
             const uint32_t cb0_wr_ptr = cb0.get_write_ptr();
-            const uint64_t mcast_dst_addr = get_noc_multicast_addr(
-                mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
-                cb0_wr_ptr, noc.get_noc_id());
-            noc_async_write_multicast(
-                cb0_wr_ptr, mcast_dst_addr,
-                Kt * act_page_bytes, num_receivers, false, noc.get_noc_id());
-            noc_async_write_barrier(noc.get_noc_id());
-
+            experimental::MulticastEndpoint mcast_dst;
+            noc.async_write_multicast(
+                experimental::CoreLocalMem<uint32_t>(cb0_wr_ptr),
+                mcast_dst,
+                Kt * act_page_bytes,
+                num_receivers,
+                {},
+                {.noc_x_start = mcast_x_start,
+                 .noc_y_start = mcast_y_start,
+                 .noc_x_end = mcast_x_end,
+                 .noc_y_end = mcast_y_end,
+                 .addr = cb0_wr_ptr},
+                true);
+#ifdef ARCH_BLACKHOLE
+            noc.async_writes_flushed();
+#endif
             receiver_sem.set_multicast(
                 noc, mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
                 num_receivers);
-            noc_async_write_barrier(noc.get_noc_id());
         }
 
         // Local push — sender has the data already from its DRAM read.
