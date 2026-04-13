@@ -45,16 +45,22 @@ void kernel_main() {
             cb_wait_front(cb_in0, in0_block_w);
             cb_wait_front(cb_in1, in0_block_w * Nt);
 
-            // One matmul_block call does in0_block_w × Nt tile-ops and
-            // accumulates into DST[0..Nt-1].
-            matmul_block(cb_in0, cb_in1,
-                         /*in0_tile_index=*/0,
-                         /*in1_tile_index=*/0,
-                         /*idst=*/0,
-                         /*transpose=*/0,
-                         /*ct_dim=*/Nt,
-                         /*rt_dim=*/1,
-                         /*kt_dim=*/in0_block_w);
+            // Inner K loop: matmul_block processes ct_dim × rt_dim = Nt × 1
+            // tile-matmuls per call, accumulating into DST[0..Nt-1]. We step
+            // through the in0_block_w K tiles within this block.
+            uint32_t in0_idx = 0;
+            uint32_t in1_idx = 0;
+            for (uint32_t k = 0; k < in0_block_w; ++k) {
+                matmul_block(cb_in0, cb_in1,
+                             in0_idx, in1_idx,
+                             /*idst=*/0,
+                             /*transpose=*/0,
+                             /*ct_dim=*/Nt,
+                             /*rt_dim=*/1,
+                             /*kt_dim=*/in0_block_w);
+                in0_idx += 1;
+                in1_idx += Nt;  // in1_block_w = Nt per core
+            }
 
             cb_pop_front(cb_in0, in0_block_w);
             cb_pop_front(cb_in1, in0_block_w * Nt);
