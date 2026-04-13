@@ -51,21 +51,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
-    // Pick in0_block_w as large as fits in L1.  We need:
-    //   2 * in0_block_w * (act_tile_bytes + nt_per_core * weight_tile_bytes)
-    //     ≤ ~600 KB (rough budget for both pipelined CBs)
-    // Otherwise we run multiple K-blocks per matmul.
+    // Single K block per matmul: entire inner dim in one acquire window.
+    // We drop CB pipelining (1× depth) since there's no mt iteration to
+    // pipeline against, which frees enough L1 to fit the full K range.
     uint32_t in0_block_w = Kt;
-    {
-        constexpr uint32_t cb_budget_bytes = 600 * 1024;
-        const uint32_t per_k_bytes = 2 * (2048 + nt_per_core * 320);  // 2048=bf16 tile, 320=bfp2 tile
-        uint32_t max_block = cb_budget_bytes / per_k_bytes;
-        if (max_block == 0) max_block = 1;
-        // Pick largest divisor of Kt that is ≤ max_block
-        for (uint32_t c = std::min(Kt, max_block); c >= 1; --c) {
-            if (Kt % c == 0) { in0_block_w = c; break; }
-        }
-    }
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -89,14 +78,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto weight_df = tt::DataFormat::Bfp2_b;
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
-    // Circular buffers. cb_in1 exp init is one-shot via L1 cache (kernel
-    // probes for the pattern), so 2× pipelining doesn't add init cost.
-    uint32_t cb0_tiles = 2 * in0_block_w;
+    // Circular buffers — single-K-block, 1× depth. No mt iteration so
+    // pipelining across K isn't needed; this halves L1 usage.
+    uint32_t cb0_tiles = in0_block_w;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    uint32_t cb1_tiles = 2 * in0_block_w * nt_per_core;
+    uint32_t cb1_tiles = in0_block_w * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
