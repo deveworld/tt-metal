@@ -52,6 +52,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Use optimized loop order when nt_per_core fits in dest registers
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
+    // Pick in0_block_w = largest divisor of Kt that is ≤ 8.
+    // matmul_block processes kt_dim tiles per call — more K per call amortizes
+    // HW dispatch overhead.
+    uint32_t in0_block_w = 1;
+    for (uint32_t c = std::min<uint32_t>(Kt, 8); c >= 1; --c) {
+        if (Kt % c == 0) { in0_block_w = c; break; }
+    }
+
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
     std::vector<CoreCoord> cores;
@@ -75,15 +83,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
     // Circular buffers
-    // CB0: activation tiles (bf16)
-    uint32_t cb0_tiles = 2;
+    // CB0: activation tiles (bf16). Sized to hold 2 × in0_block_w for pipelining.
+    uint32_t cb0_tiles = 2 * in0_block_w;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: weight tiles in Bfp2_b format. Compute's matmul_tiles invokes the
-    // Tensix unpacker which reads this CB and produces bf16 to SRC registers.
-    uint32_t cb1_tiles = 2;
+    // CB1: weight tiles in Bfp2_b format. Hardware unpacker decodes at matmul
+    // time. Sized to hold 2 × (in0_block_w × nt_per_core) for pipelining.
+    uint32_t cb1_tiles = 2 * in0_block_w * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
@@ -148,7 +156,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2,
             .fp32_dest_acc_en = true,
-            .compile_args = {Mt, Kt, nt_per_core}});
+            .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
     // === Writer kernel ===
     // With hardware bfp2 unpack, writer has no unpack role — pure output DMA.
