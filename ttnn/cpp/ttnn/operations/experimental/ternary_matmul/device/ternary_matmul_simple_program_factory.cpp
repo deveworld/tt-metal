@@ -51,18 +51,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
-    // Pick in0_block_w as large as fits in L1.  We need:
-    //   2 * in0_block_w * (act_tile_bytes + nt_per_core * weight_tile_bytes)
-    //     ≤ ~600 KB (rough budget for both pipelined CBs)
-    // Otherwise we run multiple K-blocks per matmul.
-    uint32_t in0_block_w = Kt;
+    // Pick in0_block_w. Smaller blocks let reader/writer prefetch the next
+    // K slice while compute consumes the current one (multi-iteration
+    // pipelining). Cap at 16 — enough K work per call to amortize matmul_block
+    // setup, while keeping CBs small for overlap.
+    uint32_t in0_block_w = 1;
     {
-        constexpr uint32_t cb_budget_bytes = 600 * 1024;
-        const uint32_t per_k_bytes = 2 * (2048 + nt_per_core * 320);  // 2048=bf16 tile, 320=bfp2 tile
-        uint32_t max_block = cb_budget_bytes / per_k_bytes;
-        if (max_block == 0) max_block = 1;
-        // Pick largest divisor of Kt that is ≤ max_block
-        for (uint32_t c = std::min(Kt, max_block); c >= 1; --c) {
+        constexpr uint32_t target_block = 16;
+        for (uint32_t c = std::min<uint32_t>(Kt, target_block); c >= 1; --c) {
             if (Kt % c == 0) { in0_block_w = c; break; }
         }
     }
