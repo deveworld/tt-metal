@@ -26,15 +26,30 @@ constexpr uint16_t BF16_ZERO    = 0x0000u;
 constexpr uint16_t BF16_POS_ONE = 0x3F80u;
 constexpr uint16_t BF16_NEG_ONE = 0xBF80u;
 
-static constexpr uint16_t LUT[4] = {
+static constexpr uint16_t CODE_LUT[4] = {
     BF16_ZERO, BF16_POS_ONE, BF16_NEG_ONE, BF16_ZERO,
 };
 
-inline void unpack_byte(uint8_t packed, uint16_t* dst) {
-    dst[0] = LUT[(packed >> 6) & 0x03];
-    dst[1] = LUT[(packed >> 4) & 0x03];
-    dst[2] = LUT[(packed >> 2) & 0x03];
-    dst[3] = LUT[packed & 0x03];
+// 256-entry byte → 64-bit (4 bf16) LUT. Built once at kernel entry.
+// Replaces 4 scalar 16-bit stores per byte with 1 aligned 64-bit store.
+static uint64_t BYTE_LUT[256];
+
+inline void init_byte_lut() {
+    for (uint32_t b = 0; b < 256; ++b) {
+        uint64_t v = 0;
+        v |= ((uint64_t)CODE_LUT[(b >> 6) & 0x3]) << 0;
+        v |= ((uint64_t)CODE_LUT[(b >> 4) & 0x3]) << 16;
+        v |= ((uint64_t)CODE_LUT[(b >> 2) & 0x3]) << 32;
+        v |= ((uint64_t)CODE_LUT[b & 0x3])        << 48;
+        BYTE_LUT[b] = v;
+    }
+}
+
+inline void unpack_tile_fast(const uint8_t* src, uint64_t* dst) {
+    // Each byte → 8 bytes (4 bf16). 256 bytes → 256 × 8 = 2048 bytes.
+    for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
+        dst[i] = BYTE_LUT[src[i]];
+    }
 }
 
 void kernel_main() {
@@ -64,6 +79,8 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cb_s(cb_scratch);
 
+    init_byte_lut();
+
     // Loop order: mt → kt → nt
     // Activation tile A[mt, kt] is read ONCE per kt, reused across all nt.
     // This reduces activation DRAM reads by nt_count×.
@@ -89,17 +106,15 @@ void kernel_main() {
                 noc.async_read_barrier();
                 cb_s.push_back(1);
 
-                // Unpack packed data → bf16 tile
+                // Unpack packed data → bf16 tile (LUT + 64-bit stores)
                 cb_s.wait_front(1);
                 cb1.reserve_back(1);
                 uint32_t l1_scratch_rd = get_local_cb_interface(cb_scratch).fifo_rd_ptr;
                 uint32_t l1_weight = get_local_cb_interface(cb_in1).fifo_wr_ptr;
                 const uint8_t* src = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
-                uint16_t* dst = reinterpret_cast<uint16_t*>(l1_weight);
+                uint64_t* dst = reinterpret_cast<uint64_t*>(l1_weight);
 
-                for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
-                    unpack_byte(src[i], &dst[i * 4]);
-                }
+                unpack_tile_fast(src, dst);
 
                 cb_s.pop_front(1);
                 cb1.push_back(1);

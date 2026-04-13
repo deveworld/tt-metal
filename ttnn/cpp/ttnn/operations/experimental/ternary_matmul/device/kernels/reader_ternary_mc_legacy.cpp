@@ -17,15 +17,27 @@ constexpr uint16_t BF16_ZERO    = 0x0000u;
 constexpr uint16_t BF16_POS_ONE = 0x3F80u;
 constexpr uint16_t BF16_NEG_ONE = 0xBF80u;
 
-static constexpr uint16_t LUT[4] = {
+static constexpr uint16_t CODE_LUT[4] = {
     BF16_ZERO, BF16_POS_ONE, BF16_NEG_ONE, BF16_ZERO,
 };
 
-inline void unpack_byte(uint8_t packed, uint16_t* dst) {
-    dst[0] = LUT[(packed >> 6) & 0x03];
-    dst[1] = LUT[(packed >> 4) & 0x03];
-    dst[2] = LUT[(packed >> 2) & 0x03];
-    dst[3] = LUT[packed & 0x03];
+static uint64_t BYTE_LUT[256];
+
+inline void init_byte_lut() {
+    for (uint32_t b = 0; b < 256; ++b) {
+        uint64_t v = 0;
+        v |= ((uint64_t)CODE_LUT[(b >> 6) & 0x3]) << 0;
+        v |= ((uint64_t)CODE_LUT[(b >> 4) & 0x3]) << 16;
+        v |= ((uint64_t)CODE_LUT[(b >> 2) & 0x3]) << 32;
+        v |= ((uint64_t)CODE_LUT[b & 0x3])        << 48;
+        BYTE_LUT[b] = v;
+    }
+}
+
+inline void unpack_tile_fast(const uint8_t* src, uint64_t* dst) {
+    for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
+        dst[i] = BYTE_LUT[src[i]];
+    }
 }
 
 // L1-to-L1 copy via NoC DMA (hardware transfer, much faster than SW memcpy)
@@ -66,6 +78,8 @@ void kernel_main() {
     // CB3 has Kt pages of act_page_bytes. We use fifo_wr_ptr as base.
     uint32_t cache_base = get_local_cb_interface(cb_act_cache).fifo_wr_ptr;
 
+    init_byte_lut();
+
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         // Phase 1: Read ALL Kt activation tiles from DRAM into L1 cache.
         // Use cb0 as intermediate: DRAM → cb0 → cache (L1 copy).
@@ -105,17 +119,15 @@ void kernel_main() {
                 cb0.push_back(1);
                 cb_s.push_back(1);
 
-                // Unpack packed data → bf16 tile
+                // Unpack packed data → bf16 tile (LUT + 64-bit stores)
                 cb_s.wait_front(1);
                 cb1.reserve_back(1);
                 uint32_t l1_scratch_rd = get_local_cb_interface(cb_scratch).fifo_rd_ptr;
                 uint32_t l1_weight = get_local_cb_interface(cb_in1).fifo_wr_ptr;
                 const uint8_t* wsrc = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
-                uint16_t* wdst = reinterpret_cast<uint16_t*>(l1_weight);
+                uint64_t* wdst = reinterpret_cast<uint64_t*>(l1_weight);
 
-                for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
-                    unpack_byte(wsrc[i], &wdst[i * 4]);
-                }
+                unpack_tile_fast(wsrc, wdst);
 
                 cb_s.pop_front(1);
                 cb1.push_back(1);
