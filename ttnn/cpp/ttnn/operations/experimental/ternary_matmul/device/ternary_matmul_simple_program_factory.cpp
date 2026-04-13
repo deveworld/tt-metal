@@ -89,16 +89,19 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto weight_df = tt::DataFormat::Bfp2_b;
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
-    // Circular buffers
-    // CB0: activation tiles (bf16). Sized to hold 2 × in0_block_w for pipelining.
-    uint32_t cb0_tiles = 2 * in0_block_w;
+    // Circular buffers. Use 2× pipelining only when there are multiple K
+    // blocks per matmul (so the reader can overlap with compute). For single
+    // K-block matmuls (the common case with in0_block_w = Kt), 1× is enough
+    // and halves the cb_in1 exponent-init cost on the reader.
+    const uint32_t num_k_blocks_per_matmul = Kt / in0_block_w;
+    const uint32_t pipeline_factor = (num_k_blocks_per_matmul > 1) ? 2u : 1u;
+
+    uint32_t cb0_tiles = pipeline_factor * in0_block_w;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: weight tiles in Bfp2_b format. Hardware unpacker decodes at matmul
-    // time. Sized to 2 × (in0_block_w × nt_per_core) for pipelining.
-    uint32_t cb1_tiles = 2 * in0_block_w * nt_per_core;
+    uint32_t cb1_tiles = pipeline_factor * in0_block_w * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
