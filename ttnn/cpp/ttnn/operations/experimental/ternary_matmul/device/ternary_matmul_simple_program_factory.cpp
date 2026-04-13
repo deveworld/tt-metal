@@ -84,10 +84,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
 
     // CB2: scratch for packed data (256 bytes per packed tile).
-    // Sized large so reader (NCRISC) can stay ahead of writer (BRISC) which
-    // consumes from this CB to do the SW unpack in parallel with compute.
+    // Sized very large so reader (NCRISC) prefetches nearly all weight tiles
+    // up-front, letting writer (BRISC) run unpack without ever stalling.
     auto packed_df = tt::DataFormat::RawUInt32;
-    uint32_t cb2_pages = 16;
+    uint32_t cb2_pages = 64;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
