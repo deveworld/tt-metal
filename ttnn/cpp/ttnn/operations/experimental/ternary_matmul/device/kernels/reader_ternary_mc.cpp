@@ -79,27 +79,28 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cb_s(cb_scratch);
 
-    // Reader only does DRAM reads for activation and packed weights.
-    // Unpack is handled by the writer kernel (BRISC) so both dataflow cores
-    // run in parallel with compute.
+    // Reader only does DRAM reads. All unpack is on writer (BRISC).
+    // Batch all nt_count weight reads per kt before barrier so DRAM latency
+    // pipelines across tiles.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         for (uint32_t kt = 0; kt < Kt; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
             cb0.reserve_back(1);
             noc.async_read(act_tensor, cb0, act_page_bytes,
                            {.page_id = act_tile_id}, {.offset_bytes = 0});
-            noc.async_read_barrier();
-            cb0.push_back(1);
 
+            cb_s.reserve_back(nt_count);
             for (uint32_t nc = 0; nc < nt_count; ++nc) {
                 uint32_t nt = nt_start + nc;
                 uint32_t w_tile_id = kt * Nt + nt;
-                cb_s.reserve_back(1);
                 noc.async_read(packed_tensor, cb_s, scratch_page_bytes,
-                               {.page_id = w_tile_id}, {.offset_bytes = 0});
-                noc.async_read_barrier();
-                cb_s.push_back(1);
+                               {.page_id = w_tile_id},
+                               {.offset_bytes = nc * scratch_page_bytes});
             }
+
+            noc.async_read_barrier();
+            cb0.push_back(1);
+            cb_s.push_back(nt_count);
         }
     }
 }
