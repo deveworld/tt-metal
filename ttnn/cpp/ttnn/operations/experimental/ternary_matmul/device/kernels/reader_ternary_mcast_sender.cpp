@@ -103,11 +103,12 @@ void kernel_main() {
             noc_async_write_multicast(
                 cb0_wr_ptr, mcast_dst_addr,
                 Kt * act_page_bytes, num_receivers, false, noc.get_noc_id());
-            noc_async_writes_flushed(noc.get_noc_id());
+            noc_async_write_barrier(noc.get_noc_id());
 
             receiver_sem.set_multicast(
                 noc, mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
                 num_receivers);
+            noc_async_write_barrier(noc.get_noc_id());
         }
 
         // Local push — sender has the data already from its DRAM read.
