@@ -57,7 +57,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // setup, while keeping CBs small for overlap.
     uint32_t in0_block_w = 1;
     {
-        constexpr uint32_t target_block = 16;
+        constexpr uint32_t target_block = 8;
         for (uint32_t c = std::min<uint32_t>(Kt, target_block); c >= 1; --c) {
             if (Kt % c == 0) { in0_block_w = c; break; }
         }
