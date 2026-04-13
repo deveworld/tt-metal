@@ -77,18 +77,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: unpacked weight tiles (bf16). Sized to nt_per_core * 2 so the
-    // reader can unpack one full batch ahead of compute for pipelining.
-    uint32_t cb1_tiles = std::max(2u * nt_per_core, 2u);
+    // CB1: unpacked weight tiles (bf16)
+    uint32_t cb1_tiles = 2;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
 
     // CB2: scratch for packed data (256 bytes per packed tile)
-    // Sized to hold one full batch of nt_per_core reads issued together,
-    // plus one extra set for pipelining with compute.
+    // Use uint32 format — page_size must match packed tile size
     auto packed_df = tt::DataFormat::RawUInt32;
-    uint32_t cb2_pages = std::max(2u * nt_per_core, 2u);
+    uint32_t cb2_pages = 2;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
