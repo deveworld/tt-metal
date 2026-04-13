@@ -94,6 +94,8 @@ void kernel_main() {
                 const uint8_t* src = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
                 uint64_t* dst = reinterpret_cast<uint64_t*>(l1_weight);
 
+                // DIAG: do unpack twice to see if writer is on critical path
+                unpack_tile_fast(src, dst);
                 unpack_tile_fast(src, dst);
 
                 cb_s.pop_front(1);
