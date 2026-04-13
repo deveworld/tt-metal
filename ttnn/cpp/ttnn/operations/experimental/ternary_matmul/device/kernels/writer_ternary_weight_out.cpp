@@ -104,17 +104,19 @@ void kernel_main() {
     }
 
     // Phase 2: drain cb_out → DRAM.
+    // No per-tile flushed: cb_out holds all Nt output tiles (sized
+    // nt_per_core+2) and compute finishes before the writer starts draining,
+    // so L1 slots are not reused. A single barrier at the end is enough.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
+        cbo.wait_front(nt_count);
         for (uint32_t nc = 0; nc < nt_count; ++nc) {
             uint32_t nt = nt_start + nc;
             uint32_t tile_id = mt * Nt + nt;
-
-            cbo.wait_front(1);
             noc.async_write(cbo, out_tensor, out_page_bytes,
-                            {}, {.page_id = tile_id});
-            noc.async_writes_flushed();
-            cbo.pop_front(1);
+                            {.offset_bytes = nc * out_page_bytes},
+                            {.page_id = tile_id});
         }
+        noc.async_write_barrier();
+        cbo.pop_front(nt_count);
     }
-    noc.async_write_barrier();
 }
