@@ -68,7 +68,11 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto out_df = datatype_to_dataformat_converter(output.dtype());
     uint32_t act_tile_bytes = tile_size(act_df);
     uint32_t out_tile_bytes = tile_size(out_df);
-    constexpr uint32_t PACKED_TILE_BYTES = 256;  // 32x32 * 2 bits / 8
+    // Weight is pre-packed as BFP2_b tiles (320 bytes each). The tensor is
+    // stored on host as uint32 but the bytes carry the exact bfp2 layout that
+    // the Tensix UNPACKER hardware decodes to bf16 on the fly — no SW unpack.
+    auto weight_df = tt::DataFormat::Bfp2_b;
+    uint32_t weight_tile_bytes = tile_size(weight_df);
 
     // Circular buffers
     // CB0: activation tiles (bf16)
@@ -77,20 +81,12 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: unpacked weight tiles (bf16)
+    // CB1: weight tiles in Bfp2_b format. Compute's matmul_tiles invokes the
+    // Tensix unpacker which reads this CB and produces bf16 to SRC registers.
     uint32_t cb1_tiles = 2;
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
-            .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
-
-    // CB2: scratch for packed data (256 bytes per packed tile).
-    // Sized very large so reader (NCRISC) prefetches nearly all weight tiles
-    // up-front, letting writer (BRISC) run unpack without ever stalling.
-    auto packed_df = tt::DataFormat::RawUInt32;
-    uint32_t cb2_pages = 64;
-    CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
-            .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
+        CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
+            .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
 
     // CB3: activation L1 cache for legacy reader (holds all Kt tiles)
     // Only needed for legacy loop; fast loop reads act once via CB0.
@@ -155,58 +151,30 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .compile_args = {Mt, Kt, nt_per_core}});
 
     // === Writer kernel ===
-    // Fast loop uses the dual writer (BRISC also does unpack for K-second-half).
-    // Legacy loop keeps the original output-only writer.
+    // With hardware bfp2 unpack, writer has no unpack role — pure output DMA.
     auto out_accessor = TensorAccessorArgs(*output.buffer());
-    KernelHandle writer_id;
+    std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
+    auto out_ct = out_accessor.get_compile_time_args();
+    writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
 
-    if (use_fast_loop) {
-        // Dual writer: BRISC consumes cb_scratch (produced by NCRISC reader),
-        // unpacks, and pushes to cb_in1. Also handles cb_out → DRAM.
-        std::vector<uint32_t> dual_writer_ct_args;
-        auto out_ct_w = out_accessor.get_compile_time_args();
-        dual_writer_ct_args.insert(dual_writer_ct_args.end(), out_ct_w.begin(), out_ct_w.end());
+    auto writer_id = CreateKernel(
+        program,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out_mc.cpp",
+        core_set,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .compile_args = writer_ct_args});
 
-        writer_id = CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_ternary_dual.cpp",
-            core_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
-                .noc = NOC::RISCV_0_default,
-                .compile_args = dual_writer_ct_args});
-
-        for (uint32_t i = 0; i < num_cores; ++i) {
-            uint32_t nt_start = i * nt_per_core;
-            SetRuntimeArgs(program, writer_id, cores[i], {
-                output.buffer()->address(),
-                Kt, Nt, Mt, nt_start, nt_per_core
-            });
-        }
-    } else {
-        std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
-        auto out_ct = out_accessor.get_compile_time_args();
-        writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
-
-        writer_id = CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_out_mc.cpp",
-            core_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
-                .noc = NOC::RISCV_0_default,
-                .compile_args = writer_ct_args});
-
-        for (uint32_t i = 0; i < num_cores; ++i) {
-            uint32_t nt_start = i * nt_per_core;
-            SetRuntimeArgs(program, writer_id, cores[i], {
-                output.buffer()->address(),
-                Mt, Nt, nt_start, nt_per_core
-            });
-        }
+    for (uint32_t i = 0; i < num_cores; ++i) {
+        uint32_t nt_start = i * nt_per_core;
+        SetRuntimeArgs(program, writer_id, cores[i], {
+            output.buffer()->address(),
+            Mt, Nt, nt_start, nt_per_core
+        });
     }
 
-    return {std::move(program), {reader_id, compute_id, writer_id, cores, false}};
+    return {std::move(program), {reader_id, compute_id, writer_id, cores}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(

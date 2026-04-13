@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// reader_ternary_mc.cpp - Multi-core fused reader for packed ternary matmul.
-// Each core handles a contiguous range of N tiles [nt_start, nt_start+nt_count).
+// reader_ternary_mc.cpp — Bfp2_b hardware-unpack variant.
 //
-// Loop order: mt → kt → nt (activation read once per K tile, not per K×N)
-// This reduces activation DRAM reads by nt_count× (typically 8×).
+// Each core owns a contiguous N-tile range. Reader DMAs activation tiles
+// (bf16) into cb_in0 and weight tiles (Bfp2_b, 320 bytes each) directly into
+// cb_in1. The Tensix unpacker decodes bfp2 → bf16 at matmul_tiles time, so
+// no software unpack is needed.
 //
 // Runtime args:
 //   0: act_addr      - DRAM address of activation tensor
-//   1: packed_addr   - DRAM address of packed weight tensor
+//   1: packed_addr   - DRAM address of bfp2 weight tensor
 //   2: Kt            - total K tiles
-//   3: Nt            - total N tiles (for weight tile indexing)
+//   3: Nt            - total N tiles
 //   4: Mt            - total M tiles
 //   5: nt_start      - first N tile for this core
 //   6: nt_count      - number of N tiles for this core
@@ -19,38 +20,6 @@
 #include "experimental/noc.h"
 #include "experimental/circular_buffer.h"
 #include "experimental/tensor.h"
-
-constexpr uint32_t PACKED_TILE_BYTES = 256;
-
-constexpr uint16_t BF16_ZERO    = 0x0000u;
-constexpr uint16_t BF16_POS_ONE = 0x3F80u;
-constexpr uint16_t BF16_NEG_ONE = 0xBF80u;
-
-static constexpr uint16_t CODE_LUT[4] = {
-    BF16_ZERO, BF16_POS_ONE, BF16_NEG_ONE, BF16_ZERO,
-};
-
-// 256-entry byte → 64-bit (4 bf16) LUT. Built once at kernel entry.
-// Replaces 4 scalar 16-bit stores per byte with 1 aligned 64-bit store.
-static uint64_t BYTE_LUT[256];
-
-inline void init_byte_lut() {
-    for (uint32_t b = 0; b < 256; ++b) {
-        uint64_t v = 0;
-        v |= ((uint64_t)CODE_LUT[(b >> 6) & 0x3]) << 0;
-        v |= ((uint64_t)CODE_LUT[(b >> 4) & 0x3]) << 16;
-        v |= ((uint64_t)CODE_LUT[(b >> 2) & 0x3]) << 32;
-        v |= ((uint64_t)CODE_LUT[b & 0x3])        << 48;
-        BYTE_LUT[b] = v;
-    }
-}
-
-inline void unpack_tile_fast(const uint8_t* src, uint64_t* dst) {
-    // Each byte → 8 bytes (4 bf16). 256 bytes → 256 × 8 = 2048 bytes.
-    for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
-        dst[i] = BYTE_LUT[src[i]];
-    }
-}
 
 void kernel_main() {
     uint32_t act_addr    = get_arg_val<uint32_t>(0);
@@ -62,45 +31,42 @@ void kernel_main() {
     uint32_t nt_count    = get_arg_val<uint32_t>(6);
 
     constexpr auto act_accessor_args = TensorAccessorArgs<0>();
-    constexpr auto packed_accessor_args = TensorAccessorArgs<2>();
+    constexpr auto weight_accessor_args =
+        TensorAccessorArgs<act_accessor_args.next_compile_time_args_offset()>();
 
-    constexpr uint32_t cb_in0    = 0;
-    constexpr uint32_t cb_in1    = 1;
-    constexpr uint32_t cb_scratch = 2;
+    constexpr uint32_t cb_in0 = 0;
+    constexpr uint32_t cb_in1 = 1;
 
     const uint32_t act_page_bytes = get_local_cb_interface(cb_in0).fifo_page_size;
-    const uint32_t scratch_page_bytes = get_local_cb_interface(cb_scratch).fifo_page_size;
+    const uint32_t weight_page_bytes = get_local_cb_interface(cb_in1).fifo_page_size;
 
     const auto act_tensor = TensorAccessor(act_accessor_args, act_addr, act_page_bytes);
-    const auto packed_tensor = TensorAccessor(packed_accessor_args, packed_addr, scratch_page_bytes);
+    const auto weight_tensor = TensorAccessor(weight_accessor_args, packed_addr, weight_page_bytes);
 
     experimental::Noc noc;
     experimental::CircularBuffer cb0(cb_in0);
     experimental::CircularBuffer cb1(cb_in1);
-    experimental::CircularBuffer cb_s(cb_scratch);
 
-    // Reader only does DRAM reads. All unpack is on writer (BRISC).
-    // Batch all nt_count weight reads per kt before barrier so DRAM latency
-    // pipelines across tiles.
+    // Loop order: mt → kt → nt
+    // Activation A[mt, kt] is read ONCE per kt, reused across all nt.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         for (uint32_t kt = 0; kt < Kt; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
             cb0.reserve_back(1);
             noc.async_read(act_tensor, cb0, act_page_bytes,
                            {.page_id = act_tile_id}, {.offset_bytes = 0});
+            noc.async_read_barrier();
+            cb0.push_back(1);
 
-            cb_s.reserve_back(nt_count);
             for (uint32_t nc = 0; nc < nt_count; ++nc) {
                 uint32_t nt = nt_start + nc;
                 uint32_t w_tile_id = kt * Nt + nt;
-                noc.async_read(packed_tensor, cb_s, scratch_page_bytes,
-                               {.page_id = w_tile_id},
-                               {.offset_bytes = nc * scratch_page_bytes});
+                cb1.reserve_back(1);
+                noc.async_read(weight_tensor, cb1, weight_page_bytes,
+                               {.page_id = w_tile_id}, {.offset_bytes = 0});
+                noc.async_read_barrier();
+                cb1.push_back(1);
             }
-
-            noc.async_read_barrier();
-            cb0.push_back(1);
-            cb_s.push_back(nt_count);
         }
     }
 }

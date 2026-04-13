@@ -101,12 +101,13 @@ void TernaryMatmulDeviceOperation::validate_on_program_cache_miss(
     uint32_t N;
 
     if (packed_ternary) {
-        // For packed ternary: derive N from packed buffer size and K
+        // For packed ternary (Bfp2_b format): each 32x32 weight tile is 320
+        // bytes = 80 uint32 words (256B exponent section + 64B mantissa data).
         uint32_t Kt = K / TILE_WIDTH;
         TT_FATAL(Kt > 0, "K must be tile-aligned for packed ternary");
         auto packed_vol = weight_tensor.physical_volume();
-        uint32_t Nt = packed_vol / (Kt * 64);
-        TT_FATAL(Nt > 0 && packed_vol == Kt * Nt * 64,
+        uint32_t Nt = packed_vol / (Kt * 80);
+        TT_FATAL(Nt > 0 && packed_vol == Kt * Nt * 80,
             "packed weight volume {} not consistent with Kt={}", packed_vol, Kt);
         N = Nt * TILE_WIDTH;
     } else {
@@ -261,10 +262,11 @@ TernaryMatmulDeviceOperation::spec_return_value_t TernaryMatmulDeviceOperation::
 
     uint32_t N;
     if (operation_attributes.use_packed_ternary) {
+        // Bfp2_b: 80 uint32 per 32x32 tile (320 bytes).
         uint32_t K = in0_input_tensor_shape[-1];
         uint32_t Kt = K / tt::constants::TILE_WIDTH;
         auto packed_vol = in1_input_tensor.physical_volume();
-        uint32_t Nt = packed_vol / (Kt * 64);
+        uint32_t Nt = packed_vol / (Kt * 80);
         N = Nt * tt::constants::TILE_WIDTH;
     } else {
         const auto& in1_input_tensor_shape = in1_input_tensor.logical_shape();

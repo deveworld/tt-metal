@@ -17,7 +17,6 @@ struct TernaryMatmulSimpleProgramFactory {
         tt::tt_metal::KernelHandle compute_kernel_id;
         tt::tt_metal::KernelHandle writer_kernel_id;
         std::vector<CoreCoord> cores;
-        bool dual_writer;  // true: writer also does DRAM reads + unpack (fast loop)
     };
 
     using cached_program_t = ttnn::device_operation::CachedProgram<shared_variables_t>;
