@@ -55,10 +55,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // K slice while compute consumes the current one (multi-iteration
     // pipelining). Cap at 16 — enough K work per call to amortize matmul_block
     // setup, while keeping CBs small for overlap.
-    uint32_t in0_block_w = 1;
+    // L1-budget aware in0_block_w: as large as possible to minimise cb_wait
+    // and matmul_block setup overhead, capped by available L1.
+    uint32_t in0_block_w = Kt;
     {
-        constexpr uint32_t target_block = 8;
-        for (uint32_t c = std::min<uint32_t>(Kt, target_block); c >= 1; --c) {
+        constexpr uint32_t cb_budget_bytes = 600 * 1024;
+        const uint32_t per_k_bytes = 2 * (2048 + nt_per_core * 320);
+        uint32_t max_block = cb_budget_bytes / per_k_bytes;
+        if (max_block == 0) max_block = 1;
+        for (uint32_t c = std::min(Kt, max_block); c >= 1; --c) {
             if (Kt % c == 0) { in0_block_w = c; break; }
         }
     }
@@ -146,7 +151,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::LoFi,
-            .fp32_dest_acc_en = false,  // try bf16 dest for half-sync speed
+            .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
     // === Writer (BRISC, NOC_0): weight reads + output writes ===
