@@ -80,15 +80,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
     // Circular buffers
-    // CB0: activation tiles (bf16). Sized to hold 2 × in0_block_w for pipelining.
-    uint32_t cb0_tiles = 2 * in0_block_w;
+    // CB0: activation tiles (bf16). With in0_block_w=Kt the whole K dim fits
+    // in one block; size = in0_block_w + a few extras.
+    uint32_t cb0_tiles = in0_block_w + 2;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
     // CB1: weight tiles in Bfp2_b format. Hardware unpacker decodes at matmul
-    // time. Sized to hold 2 × (in0_block_w × nt_per_core) for pipelining.
-    uint32_t cb1_tiles = 2 * in0_block_w * nt_per_core;
+    // time. Sized to hold in0_block_w × nt_per_core + headroom.
+    uint32_t cb1_tiles = in0_block_w * nt_per_core + 2;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
