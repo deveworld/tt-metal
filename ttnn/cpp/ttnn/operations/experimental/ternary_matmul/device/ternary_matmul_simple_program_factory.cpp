@@ -77,8 +77,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: unpacked weight tiles (bf16)
-    uint32_t cb1_tiles = 2;
+    // CB1: unpacked weight tiles (bf16). Sized to nt_per_core * 2 so the
+    // reader can unpack one full batch ahead of compute for pipelining.
+    uint32_t cb1_tiles = std::max(2u * nt_per_core, 2u);
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
@@ -145,14 +146,12 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // === Compute kernel ===
-    // LoFi is safe for ternary weights (values are exactly ±1/0 in bf16);
-    // fp32 dest accumulation still handles the long K-reduction.
     auto compute_id = CreateKernel(
         program,
         compute_kernel,
         core_set,
         ComputeConfig{
-            .math_fidelity = MathFidelity::LoFi,
+            .math_fidelity = MathFidelity::HiFi2,
             .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core}});
 
