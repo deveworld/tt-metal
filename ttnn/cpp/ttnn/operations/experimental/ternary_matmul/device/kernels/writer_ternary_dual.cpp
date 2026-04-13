@@ -45,24 +45,14 @@ inline void init_byte_lut() {
 }
 
 inline void unpack_tile_fast(const uint8_t* src, uint64_t* dst) {
-    // 8-way unrolled to help RISC-V load/store pipelining.
-    for (uint32_t i = 0; i < PACKED_TILE_BYTES; i += 8) {
-        uint64_t v0 = BYTE_LUT[src[i + 0]];
-        uint64_t v1 = BYTE_LUT[src[i + 1]];
-        uint64_t v2 = BYTE_LUT[src[i + 2]];
-        uint64_t v3 = BYTE_LUT[src[i + 3]];
-        uint64_t v4 = BYTE_LUT[src[i + 4]];
-        uint64_t v5 = BYTE_LUT[src[i + 5]];
-        uint64_t v6 = BYTE_LUT[src[i + 6]];
-        uint64_t v7 = BYTE_LUT[src[i + 7]];
-        dst[i + 0] = v0;
-        dst[i + 1] = v1;
-        dst[i + 2] = v2;
-        dst[i + 3] = v3;
-        dst[i + 4] = v4;
-        dst[i + 5] = v5;
-        dst[i + 6] = v6;
-        dst[i + 7] = v7;
+    // 32-bit word loads + shift/mask — reduces L1 load ops from 256 to 64.
+    const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
+    for (uint32_t i = 0; i < PACKED_TILE_BYTES / 4; ++i) {
+        uint32_t w = src32[i];
+        dst[i * 4 + 0] = BYTE_LUT[(w >> 0)  & 0xFF];
+        dst[i * 4 + 1] = BYTE_LUT[(w >> 8)  & 0xFF];
+        dst[i * 4 + 2] = BYTE_LUT[(w >> 16) & 0xFF];
+        dst[i * 4 + 3] = BYTE_LUT[(w >> 24) & 0xFF];
     }
 }
 
