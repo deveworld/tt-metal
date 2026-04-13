@@ -69,11 +69,9 @@ void kernel_main() {
     experimental::Semaphore<> receiver_sem(get_compile_time_arg_val(receiver_sem_ct_idx));
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        // Wait for every receiver to signal readiness (no-op if num_receivers=0)
-        if (num_receivers > 0) {
-            sender_sem.wait(num_receivers);
-            sender_sem.set(0);
-        }
+        // Wait for every receiver to signal "I'm ready for activation".
+        sender_sem.wait(num_receivers);
+        sender_sem.set(0);
 
         // Reserve space in local cb_in0 for the full K slice.
         cb0.reserve_back(Kt);
@@ -87,22 +85,20 @@ void kernel_main() {
         }
         noc.async_read_barrier();
 
-        // Multicast the whole Kt-tile block to every receiver's cb_in0
-        // (skip entirely when there are no receivers).
-        if (num_receivers > 0) {
-            const uint32_t cb0_wr_ptr = cb0.get_write_ptr();
-            const uint64_t mcast_dst_addr = get_noc_multicast_addr(
-                mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
-                cb0_wr_ptr, noc.get_noc_id());
-            noc_async_write_multicast(
-                cb0_wr_ptr, mcast_dst_addr,
-                Kt * act_page_bytes, num_receivers, false, noc.get_noc_id());
-            noc_async_writes_flushed(noc.get_noc_id());
+        // Multicast the whole Kt-tile block to every receiver's cb_in0.
+        const uint32_t cb0_wr_ptr = cb0.get_write_ptr();
+        const uint64_t mcast_dst_addr = get_noc_multicast_addr(
+            mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
+            cb0_wr_ptr, noc.get_noc_id());
+        noc_async_write_multicast(
+            cb0_wr_ptr, mcast_dst_addr,
+            Kt * act_page_bytes, num_receivers, false, noc.get_noc_id());
+        noc_async_writes_flushed();
 
-            receiver_sem.set_multicast(
-                noc, mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
-                num_receivers);
-        }
+        // Signal data ready to every receiver.
+        receiver_sem.set_multicast(
+            noc, mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
+            num_receivers);
 
         // Local push — sender has the data already from its DRAM read.
         cb0.push_back(Kt);
