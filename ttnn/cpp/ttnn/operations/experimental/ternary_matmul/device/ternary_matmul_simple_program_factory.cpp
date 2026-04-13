@@ -44,9 +44,11 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;  // dest register constraint
+    // Pick smallest core count that keeps nt_per_core ≤ MAX_NT_PER_CORE.
+    // Fewer cores = less NoC contention + less program launch overhead.
     uint32_t num_cores = 1;
-    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-        if (Nt % c == 0) { num_cores = c; break; }
+    for (uint32_t c = 1; c <= std::min(Nt, max_cores); ++c) {
+        if (Nt % c == 0 && Nt / c <= MAX_NT_PER_CORE) { num_cores = c; break; }
     }
     uint32_t nt_per_core = Nt / num_cores;
     // Use optimized loop order when nt_per_core fits in dest registers
