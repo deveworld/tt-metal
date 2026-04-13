@@ -13,8 +13,7 @@ namespace ttnn::experimental::prim {
 
 struct TernaryMatmulSimpleProgramFactory {
     struct shared_variables_t {
-        tt::tt_metal::KernelHandle sender_kernel_id;
-        tt::tt_metal::KernelHandle receiver_kernel_id;
+        tt::tt_metal::KernelHandle reader_kernel_id;
         tt::tt_metal::KernelHandle compute_kernel_id;
         tt::tt_metal::KernelHandle writer_kernel_id;
         std::vector<CoreCoord> cores;
