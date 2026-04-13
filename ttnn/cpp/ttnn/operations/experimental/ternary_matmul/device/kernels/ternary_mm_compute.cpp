@@ -36,15 +36,16 @@ void kernel_main() {
         tile_regs_acquire();
 
         for (uint32_t kt = 0; kt < Kt; ++kt) {
-            // One activation tile, consumed by all Nt weight tiles
+            // Wait for activation + the whole batch of Nt weight tiles at once
+            // (reader pushes all Nt after a single barrier).
             cb_wait_front(cb_in0, 1);
+            cb_wait_front(cb_in1, Nt);
 
             for (uint32_t nt = 0; nt < Nt; ++nt) {
-                cb_wait_front(cb_in1, 1);
-                matmul_tiles(cb_in0, cb_in1, 0, 0, nt);
-                cb_pop_front(cb_in1, 1);
+                matmul_tiles(cb_in0, cb_in1, 0, nt, nt);
             }
 
+            cb_pop_front(cb_in1, Nt);
             cb_pop_front(cb_in0, 1);
         }
 
