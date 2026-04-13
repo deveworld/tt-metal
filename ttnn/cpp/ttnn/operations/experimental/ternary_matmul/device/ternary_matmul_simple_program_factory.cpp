@@ -99,8 +99,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
                 .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
     }
 
-    // CB16: output tiles (bf16)
-    uint32_t cb16_tiles = 2;
+    // CB16: output tiles (bf16). Sized to hold all Nt tiles so compute can
+    // push the full output block without waiting for the writer to drain.
+    uint32_t cb16_tiles = nt_per_core + 2;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
