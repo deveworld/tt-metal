@@ -24,7 +24,6 @@
 
 #ifndef ARCH_QUASAR
 #include "experimental/circular_buffer.h"
-#include "llk_pack_api.h"
 #endif
 
 void kernel_main() {
