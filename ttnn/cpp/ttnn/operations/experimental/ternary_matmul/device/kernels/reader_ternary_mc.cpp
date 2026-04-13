@@ -60,6 +60,7 @@ void kernel_main() {
     uint32_t Mt          = get_arg_val<uint32_t>(4);
     uint32_t nt_start    = get_arg_val<uint32_t>(5);
     uint32_t nt_count    = get_arg_val<uint32_t>(6);
+    uint32_t kt_end      = get_arg_val<uint32_t>(7);  // K-split: reader handles [0, kt_end)
 
     constexpr auto act_accessor_args = TensorAccessorArgs<0>();
     constexpr auto packed_accessor_args = TensorAccessorArgs<2>();
@@ -82,9 +83,9 @@ void kernel_main() {
     init_byte_lut();
 
     // Loop order: mt → kt → nt
-    // Activation tile A[mt, kt] is read ONCE per kt, reused across all nt.
+    // Reader handles K tiles [0, kt_end); writer (BRISC) handles [kt_end, Kt).
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        for (uint32_t kt = 0; kt < Kt; ++kt) {
+        for (uint32_t kt = 0; kt < kt_end; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
             cb0.reserve_back(1);
             noc.async_read(act_tensor, cb0, act_page_bytes,
@@ -103,7 +104,13 @@ void kernel_main() {
 
                 cb_s.wait_front(1);
                 cb1.reserve_back(1);
-                // TEMP PROFILING: skip unpack to measure non-unpack floor
+                uint32_t l1_scratch_rd = get_local_cb_interface(cb_scratch).fifo_rd_ptr;
+                uint32_t l1_weight = get_local_cb_interface(cb_in1).fifo_wr_ptr;
+                const uint8_t* src = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
+                uint64_t* dst = reinterpret_cast<uint64_t*>(l1_weight);
+
+                unpack_tile_fast(src, dst);
+
                 cb_s.pop_front(1);
                 cb1.push_back(1);
             }

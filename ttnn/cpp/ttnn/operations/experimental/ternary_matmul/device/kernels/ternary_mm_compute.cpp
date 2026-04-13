@@ -2,14 +2,16 @@
 //
 // ternary_mm_compute.cpp — Blocked matmul compute kernel for ternary weights.
 //
-// Loop order: mt → kt → nt (matches reader)
-// Uses dest[0..Nt-1] to accumulate N tiles across K dimension.
-// Activation tile is consumed once per kt (shared across all nt).
+// Dual-producer variant: reader (NCRISC) produces the first kt_split tiles
+// into cb_in0/cb_in1; writer (BRISC) produces the remaining (Kt - kt_split)
+// tiles into cb_in0b/cb_in1b. Both halves accumulate into the same DST
+// registers, so the final sum is identical to a single-producer run.
 //
 // Compile-time args:
-//   arg 0: Mt — number of M-dimension tile rows
-//   arg 1: Kt — number of K-dimension tiles (inner dimension)
-//   arg 2: Nt — number of N-dimension tile columns (per core)
+//   0: Mt
+//   1: Kt
+//   2: Nt        (= nt_per_core)
+//   3: kt_split
 
 #include <cstdint>
 
@@ -24,30 +26,41 @@ void kernel_main() {
     constexpr uint32_t Mt = get_compile_time_arg_val(0);
     constexpr uint32_t Kt = get_compile_time_arg_val(1);
     constexpr uint32_t Nt = get_compile_time_arg_val(2);
+    constexpr uint32_t kt_split = get_compile_time_arg_val(3);
 
-    constexpr auto cb_in0 = tt::CBIndex::c_0;   // activation tiles (bfloat16)
-    constexpr auto cb_in1 = tt::CBIndex::c_1;   // unpacked weight tiles (bfloat16)
-    constexpr auto cb_out = tt::CBIndex::c_16;   // output tiles
+    constexpr auto cb_in0  = tt::CBIndex::c_0;
+    constexpr auto cb_in1  = tt::CBIndex::c_1;
+    constexpr auto cb_in0b = tt::CBIndex::c_4;
+    constexpr auto cb_in1b = tt::CBIndex::c_5;
+    constexpr auto cb_out  = tt::CBIndex::c_16;
 
     mm_init(cb_in0, cb_in1, cb_out);
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        // Accumulate all K tiles into dest[0..Nt-1]
         tile_regs_acquire();
 
-        for (uint32_t kt = 0; kt < Kt; ++kt) {
+        // Phase A: reader-produced K range [0, kt_split)
+        for (uint32_t kt = 0; kt < kt_split; ++kt) {
             cb_wait_front(cb_in0, 1);
-
             for (uint32_t nt = 0; nt < Nt; ++nt) {
                 cb_wait_front(cb_in1, 1);
                 matmul_tiles(cb_in0, cb_in1, 0, 0, nt);
                 cb_pop_front(cb_in1, 1);
             }
-
             cb_pop_front(cb_in0, 1);
         }
 
-        // Pack all Nt output tiles
+        // Phase B: writer-produced K range [kt_split, Kt)
+        for (uint32_t kt = kt_split; kt < Kt; ++kt) {
+            cb_wait_front(cb_in0b, 1);
+            for (uint32_t nt = 0; nt < Nt; ++nt) {
+                cb_wait_front(cb_in1b, 1);
+                matmul_tiles(cb_in0b, cb_in1b, 0, 0, nt);
+                cb_pop_front(cb_in1b, 1);
+            }
+            cb_pop_front(cb_in0b, 1);
+        }
+
         tile_regs_commit();
         tile_regs_wait();
 
