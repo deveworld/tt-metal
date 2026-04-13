@@ -52,8 +52,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Use optimized loop order when nt_per_core fits in dest registers
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
     // Dual-producer split: reader handles [0, kt_split), writer handles [kt_split, Kt).
-    // TEMP DIAG: force split=0 so writer handles ALL unpack, reader is idle.
-    uint32_t kt_split = use_fast_loop ? 0u : Kt;
+    uint32_t kt_split = use_fast_loop ? (Kt / 2) : Kt;
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
