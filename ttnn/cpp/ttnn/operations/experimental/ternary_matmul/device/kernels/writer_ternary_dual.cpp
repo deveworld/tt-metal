@@ -45,8 +45,24 @@ inline void init_byte_lut() {
 }
 
 inline void unpack_tile_fast(const uint8_t* src, uint64_t* dst) {
-    for (uint32_t i = 0; i < PACKED_TILE_BYTES; ++i) {
-        dst[i] = BYTE_LUT[src[i]];
+    // 8-way unrolled to help RISC-V load/store pipelining.
+    for (uint32_t i = 0; i < PACKED_TILE_BYTES; i += 8) {
+        uint64_t v0 = BYTE_LUT[src[i + 0]];
+        uint64_t v1 = BYTE_LUT[src[i + 1]];
+        uint64_t v2 = BYTE_LUT[src[i + 2]];
+        uint64_t v3 = BYTE_LUT[src[i + 3]];
+        uint64_t v4 = BYTE_LUT[src[i + 4]];
+        uint64_t v5 = BYTE_LUT[src[i + 5]];
+        uint64_t v6 = BYTE_LUT[src[i + 6]];
+        uint64_t v7 = BYTE_LUT[src[i + 7]];
+        dst[i + 0] = v0;
+        dst[i + 1] = v1;
+        dst[i + 2] = v2;
+        dst[i + 3] = v3;
+        dst[i + 4] = v4;
+        dst[i + 5] = v5;
+        dst[i + 6] = v6;
+        dst[i + 7] = v7;
     }
 }
 
