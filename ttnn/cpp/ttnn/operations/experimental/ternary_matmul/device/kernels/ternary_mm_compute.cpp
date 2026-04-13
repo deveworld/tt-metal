@@ -69,11 +69,10 @@ void kernel_main() {
         tile_regs_commit();
         tile_regs_wait();
 
-        for (uint32_t nt = 0; nt < Nt; ++nt) {
-            cb_reserve_back(cb_out, 1);
-            pack_tile(nt, cb_out);
-            cb_push_back(cb_out, 1);
-        }
+        // Block pack: all Nt output tiles in one call.
+        cb_reserve_back(cb_out, Nt);
+        pack_tile_block(0, cb_out, Nt);
+        cb_push_back(cb_out, Nt);
 
         tile_regs_release();
     }
