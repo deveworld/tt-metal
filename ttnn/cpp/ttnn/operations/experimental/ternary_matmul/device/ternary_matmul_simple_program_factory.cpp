@@ -55,9 +55,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // K slice while compute consumes the current one (multi-iteration
     // pipelining). Cap at 16 — enough K work per call to amortize matmul_block
     // setup, while keeping CBs small for overlap.
-    // Single K block per matmul: the whole inner dim runs inside one
-    // tile_regs_acquire/commit window so DST accumulation is correct.
-    uint32_t in0_block_w = Kt;
+    // Multi-K-block pipelining: smaller in0_block_w lets reader/compute
+    // overlap. Compute uses PACKER_L1_ACC to accumulate partial sums in
+    // cb_out's L1 region across K blocks.
+    uint32_t in0_block_w = 1;
+    {
+        constexpr uint32_t target_block = 8;
+        for (uint32_t c = std::min<uint32_t>(Kt, target_block); c >= 1; --c) {
+            if (Kt % c == 0) { in0_block_w = c; break; }
+        }
+    }
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
