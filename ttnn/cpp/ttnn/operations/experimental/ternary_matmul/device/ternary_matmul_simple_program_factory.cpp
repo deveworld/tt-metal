@@ -144,7 +144,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         SetRuntimeArgs(program, reader_id, cores[i], {
             activation.buffer()->address(),
             packed_weight.buffer()->address(),
-            Kt, Nt, Mt, nt_start, nt_per_core
+            Kt, Nt, Mt, nt_start, nt_per_core, in0_block_w
         });
     }
 
