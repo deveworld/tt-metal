@@ -53,7 +53,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
     // Dual-producer split: reader handles [0, kt_split), writer handles [kt_split, Kt).
     // Only enabled on fast loop (legacy path keeps the old single-producer writer).
-    uint32_t kt_split = use_fast_loop ? (Kt / 2) : Kt;
+    // TEMP DIAG: force split=Kt so writer does no unpack; compute's Phase B runs
+    // with 0 iterations. Any slowdown vs. baseline is pure two-phase overhead.
+    uint32_t kt_split = use_fast_loop ? Kt : Kt;
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
