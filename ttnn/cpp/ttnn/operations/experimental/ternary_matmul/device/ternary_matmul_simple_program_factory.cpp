@@ -149,12 +149,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // === Compute kernel ===
+    // LoFi is safe here: the weight side is Bfp2_b with shared exp=0, so every
+    // weight tile has values in exactly {-1, 0, +1} which survive any mantissa
+    // rounding. fp32 dest accumulation preserves precision across long K.
     auto compute_id = CreateKernel(
         program,
         compute_kernel,
         core_set,
         ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi2,
+            .math_fidelity = MathFidelity::LoFi,
             .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
