@@ -51,8 +51,6 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t nt_per_core = Nt / num_cores;
     // Use optimized loop order when nt_per_core fits in dest registers
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
-    // Dual-producer split: reader handles [0, kt_split), writer handles [kt_split, Kt).
-    uint32_t kt_split = use_fast_loop ? (Kt / 2) : Kt;
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -85,10 +83,11 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
 
-    // CB2: scratch for packed data (256 bytes per packed tile)
-    // Use uint32 format — page_size must match packed tile size
+    // CB2: scratch for packed data (256 bytes per packed tile).
+    // Sized large so reader (NCRISC) can stay ahead of writer (BRISC) which
+    // consumes from this CB to do the SW unpack in parallel with compute.
     auto packed_df = tt::DataFormat::RawUInt32;
-    uint32_t cb2_pages = 2;
+    uint32_t cb2_pages = 16;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb2_pages * PACKED_TILE_BYTES, {{tt::CBIndex::c_2, packed_df}})
             .set_page_size(tt::CBIndex::c_2, PACKED_TILE_BYTES));
@@ -100,21 +99,6 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CreateCircularBuffer(program, core_set,
             CircularBufferConfig(cb3_tiles * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
                 .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
-    }
-
-    // CB4/5/6: second-half CBs for dual-producer fast loop.
-    // Writer (BRISC) pushes its K-half into these; compute consumes them in
-    // phase B. Legacy path doesn't use them.
-    if (use_fast_loop) {
-        CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_4, act_df}})
-                .set_page_size(tt::CBIndex::c_4, act_tile_bytes));
-        CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_5, act_df}})
-                .set_page_size(tt::CBIndex::c_5, act_tile_bytes));
-        CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(2 * PACKED_TILE_BYTES, {{tt::CBIndex::c_6, packed_df}})
-                .set_page_size(tt::CBIndex::c_6, PACKED_TILE_BYTES));
     }
 
     // CB16: output tiles (bf16)
@@ -151,22 +135,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .compile_args = reader_ct_args});
 
     // Per-core reader runtime args.
-    // Fast loop reader now takes kt_end (K-split); legacy reader ignores it.
     for (uint32_t i = 0; i < num_cores; ++i) {
         uint32_t nt_start = i * nt_per_core;
-        if (use_fast_loop) {
-            SetRuntimeArgs(program, reader_id, cores[i], {
-                activation.buffer()->address(),
-                packed_weight.buffer()->address(),
-                Kt, Nt, Mt, nt_start, nt_per_core, kt_split
-            });
-        } else {
-            SetRuntimeArgs(program, reader_id, cores[i], {
-                activation.buffer()->address(),
-                packed_weight.buffer()->address(),
-                Kt, Nt, Mt, nt_start, nt_per_core
-            });
-        }
+        SetRuntimeArgs(program, reader_id, cores[i], {
+            activation.buffer()->address(),
+            packed_weight.buffer()->address(),
+            Kt, Nt, Mt, nt_start, nt_per_core
+        });
     }
 
     // === Compute kernel ===
@@ -177,7 +152,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2,
             .fp32_dest_acc_en = true,
-            .compile_args = {Mt, Kt, nt_per_core, kt_split}});
+            .compile_args = {Mt, Kt, nt_per_core}});
 
     // === Writer kernel ===
     // Fast loop uses the dual writer (BRISC also does unpack for K-second-half).
@@ -186,12 +161,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     KernelHandle writer_id;
 
     if (use_fast_loop) {
+        // Dual writer: BRISC consumes cb_scratch (produced by NCRISC reader),
+        // unpacks, and pushes to cb_in1. Also handles cb_out → DRAM.
         std::vector<uint32_t> dual_writer_ct_args;
-        auto act_ct_w = act_accessor.get_compile_time_args();
-        auto packed_ct_w = packed_accessor.get_compile_time_args();
         auto out_ct_w = out_accessor.get_compile_time_args();
-        dual_writer_ct_args.insert(dual_writer_ct_args.end(), act_ct_w.begin(), act_ct_w.end());
-        dual_writer_ct_args.insert(dual_writer_ct_args.end(), packed_ct_w.begin(), packed_ct_w.end());
         dual_writer_ct_args.insert(dual_writer_ct_args.end(), out_ct_w.begin(), out_ct_w.end());
 
         writer_id = CreateKernel(
@@ -206,10 +179,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         for (uint32_t i = 0; i < num_cores; ++i) {
             uint32_t nt_start = i * nt_per_core;
             SetRuntimeArgs(program, writer_id, cores[i], {
-                activation.buffer()->address(),
-                packed_weight.buffer()->address(),
                 output.buffer()->address(),
-                Kt, Nt, Mt, nt_start, nt_per_core, kt_split
+                Kt, Nt, Mt, nt_start, nt_per_core
             });
         }
     } else {
@@ -235,7 +206,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         }
     }
 
-    return {std::move(program), {reader_id, compute_id, writer_id, cores, use_fast_loop}};
+    return {std::move(program), {reader_id, compute_id, writer_id, cores, false}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
@@ -255,14 +226,7 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
         reader_args[1] = inputs.weight_tensor.buffer()->address();
 
         auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, core);
-        if (shared.dual_writer) {
-            // Dual writer: act_addr, packed_addr, out_addr at positions 0, 1, 2
-            writer_args[0] = inputs.input_tensor.buffer()->address();
-            writer_args[1] = inputs.weight_tensor.buffer()->address();
-            writer_args[2] = output.buffer()->address();
-        } else {
-            writer_args[0] = output.buffer()->address();
-        }
+        writer_args[0] = output.buffer()->address();
     }
 }
 

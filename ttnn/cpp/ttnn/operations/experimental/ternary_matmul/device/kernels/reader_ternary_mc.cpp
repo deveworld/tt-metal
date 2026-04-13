@@ -60,7 +60,6 @@ void kernel_main() {
     uint32_t Mt          = get_arg_val<uint32_t>(4);
     uint32_t nt_start    = get_arg_val<uint32_t>(5);
     uint32_t nt_count    = get_arg_val<uint32_t>(6);
-    uint32_t kt_end      = get_arg_val<uint32_t>(7);  // K-split: reader handles [0, kt_end)
 
     constexpr auto act_accessor_args = TensorAccessorArgs<0>();
     constexpr auto packed_accessor_args = TensorAccessorArgs<2>();
@@ -80,12 +79,11 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cb_s(cb_scratch);
 
-    init_byte_lut();
-
-    // Loop order: mt → kt → nt
-    // Reader handles K tiles [0, kt_end); writer (BRISC) handles [kt_end, Kt).
+    // Reader only does DRAM reads for activation and packed weights.
+    // Unpack is handled by the writer kernel (BRISC) so both dataflow cores
+    // run in parallel with compute.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        for (uint32_t kt = 0; kt < kt_end; ++kt) {
+        for (uint32_t kt = 0; kt < Kt; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
             cb0.reserve_back(1);
             noc.async_read(act_tensor, cb0, act_page_bytes,
@@ -101,12 +99,6 @@ void kernel_main() {
                                {.page_id = w_tile_id}, {.offset_bytes = 0});
                 noc.async_read_barrier();
                 cb_s.push_back(1);
-
-                cb_s.wait_front(1);
-                cb1.reserve_back(1);
-                // TEMP DIAG: reader skips unpack, writer does full half
-                cb_s.pop_front(1);
-                cb1.push_back(1);
             }
         }
     }
