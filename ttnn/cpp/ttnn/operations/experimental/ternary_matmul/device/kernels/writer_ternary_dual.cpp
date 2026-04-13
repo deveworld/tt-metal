@@ -110,13 +110,7 @@ void kernel_main() {
 
                 cb_sb.wait_front(1);
                 cb1b.reserve_back(1);
-                uint32_t l1_scratch_rd = get_local_cb_interface(cb_scratch_b).fifo_rd_ptr;
-                uint32_t l1_weight = get_local_cb_interface(cb_in1b).fifo_wr_ptr;
-                const uint8_t* src = reinterpret_cast<const uint8_t*>(l1_scratch_rd);
-                uint64_t* dst = reinterpret_cast<uint64_t*>(l1_weight);
-
-                unpack_tile_fast(src, dst);
-
+                // TEMP DIAG: writer skips unpack too
                 cb_sb.pop_front(1);
                 cb1b.push_back(1);
             }
