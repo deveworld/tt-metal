@@ -146,7 +146,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::LoFi,
-            .fp32_dest_acc_en = true,
+            .fp32_dest_acc_en = false,  // try bf16 dest for half-sync speed
             .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
     // === Writer (BRISC, NOC_0): weight reads + output writes ===
