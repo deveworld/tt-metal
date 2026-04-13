@@ -154,52 +154,28 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         reader_ct_args.push_back(receiver_sem_id);
     }
 
-    // === Reader kernels ===
-    // Single-core fallback: use the simple non-multicast reader. Multi-core:
-    // sender + receiver split with activation multicast.
-    KernelHandle sender_id = 0;
+    // === Sender reader kernel ===
+    auto sender_id = CreateKernel(
+        program,
+        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mcast_sender.cpp",
+        sender_set,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_1,
+            .noc = NOC::RISCV_1_default,
+            .compile_args = reader_ct_args});
+
+    SetRuntimeArgs(program, sender_id, sender_logical, {
+        activation.buffer()->address(),
+        packed_weight.buffer()->address(),
+        Kt, Nt, Mt,
+        /*nt_start=*/0, nt_per_core,
+        mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
+        num_receivers
+    });
+
+    // === Receiver reader kernel ===
     KernelHandle receiver_id = 0;
-    if (num_receivers == 0) {
-        // Single-core path uses the old reader_ternary_mc.cpp directly.
-        std::vector<uint32_t> simple_ct_args;
-        auto act_ct = act_accessor.get_compile_time_args();
-        auto packed_ct = packed_accessor.get_compile_time_args();
-        simple_ct_args.insert(simple_ct_args.end(), act_ct.begin(), act_ct.end());
-        simple_ct_args.insert(simple_ct_args.end(), packed_ct.begin(), packed_ct.end());
-
-        sender_id = CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mc.cpp",
-            sender_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = NOC::RISCV_1_default,
-                .compile_args = simple_ct_args});
-
-        SetRuntimeArgs(program, sender_id, sender_logical, {
-            activation.buffer()->address(),
-            packed_weight.buffer()->address(),
-            Kt, Nt, Mt, /*nt_start=*/0, nt_per_core, in0_block_w
-        });
-    } else {
-        sender_id = CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mcast_sender.cpp",
-            sender_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = NOC::RISCV_1_default,
-                .compile_args = reader_ct_args});
-
-        SetRuntimeArgs(program, sender_id, sender_logical, {
-            activation.buffer()->address(),
-            packed_weight.buffer()->address(),
-            Kt, Nt, Mt,
-            /*nt_start=*/0, nt_per_core,
-            mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
-            num_receivers
-        });
-
+    if (num_receivers > 0) {
         receiver_id = CreateKernel(
             program,
             "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_mcast_receiver.cpp",
