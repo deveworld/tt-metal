@@ -145,12 +145,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // === Compute kernel ===
+    // LoFi is safe for ternary weights (values are exactly ±1/0 in bf16);
+    // fp32 dest accumulation still handles the long K-reduction.
     auto compute_id = CreateKernel(
         program,
         compute_kernel,
         core_set,
         ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi2,
+            .math_fidelity = MathFidelity::LoFi,
             .fp32_dest_acc_en = true,
             .compile_args = {Mt, Kt, nt_per_core}});
 
