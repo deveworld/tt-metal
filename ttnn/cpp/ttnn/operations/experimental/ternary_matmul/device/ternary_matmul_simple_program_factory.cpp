@@ -69,7 +69,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Pick rectangular only when it uses AT LEAST as many cores as the
     // L-shape; more cores means shorter compute wall time, which matters
     // more than activation-mcast savings in our shapes.
-    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 4);
+    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 2);
     uint32_t num_cores = use_mcast ? rect_cores : lshape_cores;
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
