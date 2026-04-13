@@ -77,8 +77,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    // CB1: unpacked weight tiles (bf16)
-    uint32_t cb1_tiles = 2;
+    // CB1: unpacked weight tiles (bf16). Sized large so compute can consume
+    // while writer unpacks ahead — widens the producer/consumer pipeline.
+    uint32_t cb1_tiles = 8;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * act_tile_bytes, {{tt::CBIndex::c_1, act_df}})
             .set_page_size(tt::CBIndex::c_1, act_tile_bytes));
