@@ -57,16 +57,23 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
 
     // One-shot init: fill every cb_in1 slot's exponent block with 0x7F.
-    // At kernel start the CB is empty, so its write pointer is at the base
-    // of the L1 region. Walk through every slot once.
+    // Skip if the very first slot already shows the pattern — under trace
+    // mode L1 contents survive across kernel launches, so the init only
+    // needs to run on the first invocation of this program.
     const uint32_t cb1_base = get_write_ptr(cb_in1);
     const uint32_t cb1_num_slots = get_local_cb_interface(cb_in1).fifo_num_pages;
-    for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
-        volatile tt_l1_ptr uint32_t* exp_ptr =
-            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
-                cb1_base + slot * BFP2_TILE_BYTES);
-        for (uint32_t i = 0; i < BFP2_EXP_BYTES / 4; ++i) {
-            exp_ptr[i] = EXP_FILL_WORD;
+    {
+        volatile tt_l1_ptr uint32_t* probe =
+            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cb1_base);
+        if (*probe != EXP_FILL_WORD) {
+            for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
+                volatile tt_l1_ptr uint32_t* exp_ptr =
+                    reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
+                        cb1_base + slot * BFP2_TILE_BYTES);
+                for (uint32_t i = 0; i < BFP2_EXP_BYTES / 4; ++i) {
+                    exp_ptr[i] = EXP_FILL_WORD;
+                }
+            }
         }
     }
 
