@@ -68,12 +68,6 @@ void kernel_main() {
     experimental::Semaphore<> sender_sem(get_compile_time_arg_val(sender_sem_ct_idx));
     experimental::Semaphore<> receiver_sem(get_compile_time_arg_val(receiver_sem_ct_idx));
 
-    // set_multicast reads from the local copy and propagates to receivers,
-    // so the source value must be VALID up-front.
-    if (num_receivers > 0) {
-        receiver_sem.set(VALID);
-    }
-
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         // Wait for every receiver to signal readiness (no-op if num_receivers=0)
         if (num_receivers > 0) {
