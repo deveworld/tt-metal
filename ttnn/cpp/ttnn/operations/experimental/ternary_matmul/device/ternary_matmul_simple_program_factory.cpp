@@ -52,11 +52,10 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // Use optimized loop order when nt_per_core fits in dest registers
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
-    // Pick in0_block_w = largest divisor of Kt that is ≤ 8.
-    // matmul_block processes kt_dim tiles per call — more K per call amortizes
-    // HW dispatch overhead.
+    // Pick in0_block_w = largest divisor of Kt that is ≤ 16. Bigger K-blocks
+    // amortize reader barrier and matmul_block setup overhead.
     uint32_t in0_block_w = 1;
-    for (uint32_t c = std::min<uint32_t>(Kt, 8); c >= 1; --c) {
+    for (uint32_t c = std::min<uint32_t>(Kt, 16); c >= 1; --c) {
         if (Kt % c == 0) { in0_block_w = c; break; }
     }
 
