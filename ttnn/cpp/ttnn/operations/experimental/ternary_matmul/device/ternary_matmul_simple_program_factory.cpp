@@ -45,7 +45,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // num_k_blocks so that in0_block_w (= matmul_block's kt_dim) is ≤ 128.
     // CB sizes stay the same (total tiles = Kt) — splitting only changes
     // how compute iterates.
-    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
+    constexpr uint32_t KT_SAFE_THRESHOLD = 80;
     uint32_t num_k_blocks = 1;
     uint32_t in0_block_w = Kt;
     if (Kt > KT_SAFE_THRESHOLD) {
