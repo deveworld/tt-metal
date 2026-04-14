@@ -58,9 +58,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // reader/writer can DMA block B. Previous attempt was perf-neutral but
     // was measured before the BRISC sender fix and the full QKV-to-ternary
     // integration; worth retrying now.
-    uint32_t in0_block_w = (Kt % 4 == 0 && Kt >= 8) ? (Kt / 4)
-                          : (Kt % 2 == 0 && Kt >= 4) ? (Kt / 2)
-                          : Kt;
+    uint32_t in0_block_w = (Kt % 2 == 0 && Kt >= 4) ? (Kt / 2) : Kt;
 
     // Multi-core: distribute Nt tiles across the compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
