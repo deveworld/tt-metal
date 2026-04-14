@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// writer_ternary_weight_out.cpp — BRISC kernel that handles BOTH the per-core
-// weight DRAM reads (NOC_0) and the output writes (NOC_0). Reader (NCRISC,
-// NOC_1) handles only the activation reads, so both NoCs run in parallel.
+// writer_ternary_weight_out.cpp — NCRISC kernel handling the per-core
+// weight DRAM reads, the L1 exponent-block synth for BFP2_b, and the
+// output writes. Runs on NCRISC/NOC_1. The activation reader (and
+// multicast sender/receiver) live on BRISC/NOC_0 so the two NoCs run
+// in parallel.
 //
-// The weight CB still uses the BFP2_b layout (320 B/tile). DRAM stores only
-// the 256 B mantissa per tile; this kernel pre-fills the constant 0x7F
-// exponent block once per program lifetime (L1 probe cached) and per tile
-// DMAs only the 256 B mantissa into bytes [64..319].
+// The weight CB uses BFP2_b format (320 B/tile, HW unpack). DRAM stores
+// only the 256 B mantissa per tile; this kernel fills the constant 0x7F
+// exponent block for every cb1 slot at kernel start (the compile-time
+// slot count = Kt × nt_count lets the inner loop unroll), then DMAs the
+// mantissa into bytes [64..319] of each slot per tile.
 //
 // Compile-time args:
 //   0: out_cb_idx        (= cb_out)

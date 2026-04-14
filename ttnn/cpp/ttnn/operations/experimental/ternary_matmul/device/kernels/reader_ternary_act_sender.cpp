@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// reader_ternary_act_sender.cpp — NCRISC kernel on the single sender core.
+// reader_ternary_act_sender.cpp — BRISC kernel on the single sender core.
 //
 // Reads all Kt activation tiles from DRAM into local cb_in0, then multicasts
 // the block to every receiver's cb_in0 region, then signals the receiver
 // semaphore. Receivers pick up the data without any DRAM read. Producer
 // side of activation-multicast pattern used by production matmul kernels.
+//
+// MUST run on BRISC/NOC_0. Multicast writes originated from NCRISC on
+// Blackhole hang and corrupt the dispatcher CQ regardless of rectangle
+// size, contiguity, explicit noc= arg, or barrier choice. Production
+// `reader_bmm_tile_layout_in0_sender_padding.cpp` runs on RISCV_0 for
+// the same reason.
 //
 // Compile-time args:
 //   0: Kt

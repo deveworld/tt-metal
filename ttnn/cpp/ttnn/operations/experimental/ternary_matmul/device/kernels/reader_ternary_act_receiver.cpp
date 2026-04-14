@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// reader_ternary_act_receiver.cpp — NCRISC kernel on every non-sender core.
+// reader_ternary_act_receiver.cpp — BRISC kernel on every non-sender core.
 //
 // Does NOT read activation from DRAM. Instead, signals the sender (by
 // atomically incrementing the sender's sender_sem), then spin-waits on
 // the local receiver_sem until the sender multicasts the data + sets
 // the sem to VALID. Then pushes cb_in0 so compute can consume. Consumer
 // side of the activation-multicast pattern.
+//
+// Runs on BRISC/NOC_0 to match the sender (see
+// reader_ternary_act_sender.cpp for why NCRISC-originated multicast is
+// unreliable on Blackhole).
 //
 // Compile-time args (shape + semaphore config):
 //   0: Kt

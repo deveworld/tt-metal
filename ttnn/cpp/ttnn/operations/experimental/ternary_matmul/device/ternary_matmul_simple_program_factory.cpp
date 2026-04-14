@@ -1,11 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Multi-core ternary matmul program factory.
-// Reads packed 2-bit (BFP2_b) ternary weights via the Tensix unpacker and
-// runs a block matmul. Dual-NoC split: NCRISC/NOC_1 reads activations,
-// BRISC/NOC_0 reads weights and writes outputs. Weight tensor stores only
-// the 256-byte mantissa per tile; the constant 0x7F exponent block is
-// synthesized in L1 by the writer kernel.
+//
+// Reads packed 2-bit (BFP2_b) ternary weights via the Tensix unpacker
+// and runs a block matmul. RISC layout (production in0-sender pattern):
+//   BRISC / NOC_0: activation reader (+ multicast sender/receiver)
+//   NCRISC / NOC_1: writer = weight DMAs + cb1 exp init + output writes
+//
+// The weight tensor stores only the 256 B mantissa per tile in DRAM;
+// the constant 0x7F exponent block is synthesized in L1 by the writer
+// kernel at every launch.
+//
+// For shapes where a rectangular core layout matches or beats the
+// L-shape core count, the factory picks multicast: core (0,0) runs
+// the sender kernel (DRAM read → `noc_async_write_multicast` of the
+// block → sem mcast), and the rest of the rectangle runs the receiver
+// kernel (sem handshake only, no DRAM read). The sender must run on
+// BRISC/NOC_0 — multicast writes originated from NCRISC on Blackhole
+// corrupt the dispatcher command queue.
 
 #include "ternary_matmul_simple_program_factory.hpp"
 

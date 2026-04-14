@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// reader_ternary_act_only.cpp — NCRISC kernel that ONLY reads the activation
-// tiles from DRAM into cb_in0. Weight reads are handled by the writer kernel
-// on BRISC so the two NoCs (NOC_1 + NOC_0) operate in parallel.
+// reader_ternary_act_only.cpp — BRISC kernel that reads activation tiles
+// from DRAM into cb_in0 (non-multicast unicast path). Weight reads and
+// output writes live on the writer kernel on NCRISC/NOC_1 so the two NoCs
+// run in parallel.
+//
+// Runs on BRISC (RISCV_0 / NOC_0) — opposite of the usual convention —
+// because the multicast variants of this reader must run on BRISC on
+// Blackhole (NCRISC-originated multicast corrupts dispatcher CQ), and
+// keeping the unicast and mcast readers on the same RISC simplifies the
+// program factory.
 //
 // Compile-time args:
 //   0: Kt
