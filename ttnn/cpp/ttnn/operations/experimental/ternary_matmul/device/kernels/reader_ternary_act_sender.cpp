@@ -86,6 +86,9 @@ void kernel_main() {
 
             // Multicast the whole block to every receiver's cb_in0.
             if constexpr (num_mcast_dests > 0) {
+                // DEBUG: skip the data mcast write to isolate whether the
+                // data write or the sem mcast is what corrupts the CQ.
+#if 0
                 const uint64_t mcast_dest_addr = get_noc_multicast_addr(
                     mcast_x_start, mcast_y_start,
                     mcast_x_end,   mcast_y_end,
@@ -100,6 +103,7 @@ void kernel_main() {
                     /*linked=*/false);
 #ifdef ARCH_BLACKHOLE
                 noc_async_writes_flushed();
+#endif
 #endif
 
                 // Signal data ready on every receiver.
