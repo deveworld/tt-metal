@@ -40,26 +40,33 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
-    // the output block (ct_dim) per call, which amortizes that overhead more
-    // effectively than spreading work over more cores that each do nt=1.
-    // We prefer nt_per_core ≥ 2 when Nt is divisible; capped at 8 for the
-    // half-sync dest register limit.
+    // the output block (ct_dim) per call, amortizing that overhead better
+    // than spreading work over more cores that each do nt=1. We prefer
+    // nt_per_core ≥ 2 when Nt is divisible; capped at 8 for the half-sync
+    // dest register limit.
+    //
+    // KT_SAFE_THRESHOLD: with Kt > 128 we've observed NaN output from the
+    // Bfp2_b multi-core matmul_block path when ct_dim ≥ 2 (suspected LLK
+    // MOP/address-gen issue specific to large kt_dim with >1 core). Fall
+    // back to the legacy (nt_per_core=1) distribution in that regime.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;
     constexpr uint32_t MIN_NT_PER_CORE = 2;
+    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
     uint32_t num_cores = 1;
-    // First try: largest divisor of Nt giving nt_per_core ∈ [MIN, MAX].
-    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-        if (Nt % c == 0) {
-            uint32_t npc = Nt / c;
-            if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                num_cores = c;
-                break;
+    if (Kt <= KT_SAFE_THRESHOLD) {
+        for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
+            if (Nt % c == 0) {
+                uint32_t npc = Nt / c;
+                if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
+                    num_cores = c;
+                    break;
+                }
             }
         }
     }
-    // Fallback: largest divisor of Nt ≤ max_cores (old behaviour).
+    // Fallback / Kt > threshold path: largest divisor of Nt ≤ max_cores.
     if (num_cores == 1) {
         for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
             if (Nt % c == 0) { num_cores = c; break; }
