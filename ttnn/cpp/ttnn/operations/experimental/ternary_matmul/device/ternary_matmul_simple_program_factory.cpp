@@ -38,32 +38,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Multi-core: distribute Nt tiles across compute grid.
-    // Each matmul_block call has fixed overhead; raising nt_per_core widens
-    // the output block (ct_dim) per call, which amortizes that overhead more
-    // effectively than spreading work over more cores that each do nt=1.
-    // We prefer nt_per_core ≥ 2 when Nt is divisible; capped at 8 for the
-    // half-sync dest register limit.
+    // Multi-core: distribute Nt tiles across first row of compute grid.
+    // With optimized loop order (mt→kt→nt), nt_per_core must be ≤ 8
+    // (half-sync dest register limit). If not achievable, use legacy order.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_cores = device_grid.x * device_grid.y;
-    constexpr uint32_t MAX_NT_PER_CORE = 8;
-    constexpr uint32_t MIN_NT_PER_CORE = 2;
+    constexpr uint32_t MAX_NT_PER_CORE = 8;  // dest register constraint
     uint32_t num_cores = 1;
-    // First try: largest divisor of Nt giving nt_per_core ∈ [MIN, MAX].
     for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-        if (Nt % c == 0) {
-            uint32_t npc = Nt / c;
-            if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                num_cores = c;
-                break;
-            }
-        }
-    }
-    // Fallback: largest divisor of Nt ≤ max_cores (old behaviour).
-    if (num_cores == 1) {
-        for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-            if (Nt % c == 0) { num_cores = c; break; }
-        }
+        if (Nt % c == 0) { num_cores = c; break; }
     }
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
