@@ -3,11 +3,14 @@
 // tiles from DRAM into cb_in0. Weight reads are handled by the writer kernel
 // on BRISC so the two NoCs (NOC_1 + NOC_0) operate in parallel.
 //
+// Compile-time args:
+//   0: Kt
+//   1: Mt
+//   2: in0_block_w
+//   3..: activation TensorAccessorArgs
+//
 // Runtime args:
 //   0: act_addr
-//   1: Kt
-//   2: Mt
-//   3: in0_block_w
 
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
@@ -16,12 +19,14 @@
 #include "experimental/tensor.h"
 
 void kernel_main() {
-    uint32_t act_addr    = get_arg_val<uint32_t>(0);
-    uint32_t Kt          = get_arg_val<uint32_t>(1);
-    uint32_t Mt          = get_arg_val<uint32_t>(2);
-    uint32_t in0_block_w = get_arg_val<uint32_t>(3);
+    uint32_t act_addr = get_arg_val<uint32_t>(0);
 
-    constexpr auto act_accessor_args = TensorAccessorArgs<0>();
+    constexpr uint32_t Kt          = get_compile_time_arg_val(0);
+    constexpr uint32_t Mt          = get_compile_time_arg_val(1);
+    constexpr uint32_t in0_block_w = get_compile_time_arg_val(2);
+    constexpr uint32_t num_k_blocks = Kt / in0_block_w;
+
+    constexpr auto act_accessor_args = TensorAccessorArgs<3>();
 
     constexpr uint32_t cb_in0 = 0;
 
@@ -30,8 +35,6 @@ void kernel_main() {
 
     experimental::Noc noc;
     experimental::CircularBuffer cb0(cb_in0);
-
-    const uint32_t num_k_blocks = Kt / in0_block_w;
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         for (uint32_t kb = 0; kb < num_k_blocks; ++kb) {

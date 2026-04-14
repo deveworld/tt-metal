@@ -8,20 +8,20 @@
 // exponent block once per program lifetime (L1 probe cached) and per tile
 // DMAs only the 256 B mantissa into bytes [64..319].
 //
+// Compile-time args:
+//   0: out_cb_idx        (= cb_out)
+//   1: Kt
+//   2: Nt
+//   3: Mt
+//   4: nt_count
+//   5: in0_block_w
+//   6..: weight TensorAccessorArgs
+//   following: out TensorAccessorArgs
+//
 // Runtime args:
 //   0: out_addr      DRAM address of output tensor
 //   1: packed_addr   DRAM base of mantissa-only weight tensor
-//   2: Kt
-//   3: Nt
-//   4: Mt
-//   5: nt_start
-//   6: nt_count
-//   7: in0_block_w
-//
-// Compile-time args:
-//   0: out_cb_idx        (= cb_out)
-//   1..: weight TensorAccessorArgs
-//   following: out TensorAccessorArgs
+//   2: nt_start      (per-core; only this one varies between cores)
 
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
@@ -35,17 +35,17 @@ constexpr uint32_t BFP2_MAN_BYTES  = 256;
 constexpr uint32_t EXP_FILL_WORD   = 0x7F7F7F7Fu;
 
 void kernel_main() {
-    uint32_t out_addr     = get_arg_val<uint32_t>(0);
-    uint32_t packed_addr  = get_arg_val<uint32_t>(1);
-    uint32_t Kt           = get_arg_val<uint32_t>(2);
-    uint32_t Nt           = get_arg_val<uint32_t>(3);
-    uint32_t Mt           = get_arg_val<uint32_t>(4);
-    uint32_t nt_start     = get_arg_val<uint32_t>(5);
-    uint32_t nt_count     = get_arg_val<uint32_t>(6);
-    uint32_t in0_block_w  = get_arg_val<uint32_t>(7);
+    uint32_t out_addr    = get_arg_val<uint32_t>(0);
+    uint32_t packed_addr = get_arg_val<uint32_t>(1);
+    uint32_t nt_start    = get_arg_val<uint32_t>(2);
 
     constexpr uint32_t out_cb_idx = get_compile_time_arg_val(0);
-    constexpr auto weight_accessor_args = TensorAccessorArgs<1>();
+    constexpr uint32_t Kt          = get_compile_time_arg_val(1);
+    constexpr uint32_t Nt          = get_compile_time_arg_val(2);
+    constexpr uint32_t Mt          = get_compile_time_arg_val(3);
+    constexpr uint32_t nt_count    = get_compile_time_arg_val(4);
+    constexpr uint32_t in0_block_w = get_compile_time_arg_val(5);
+    constexpr auto weight_accessor_args = TensorAccessorArgs<6>();
     constexpr auto out_accessor_args =
         TensorAccessorArgs<weight_accessor_args.next_compile_time_args_offset()>();
 

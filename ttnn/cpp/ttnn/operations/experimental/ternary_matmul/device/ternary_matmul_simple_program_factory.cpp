@@ -51,14 +51,11 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
-    // Multi-K-block pipelining: split K into 2 blocks so reader/writer can
-    // fill block[kb+1] while compute consumes block[kb]. Total CB tiles stay
-    // at Kt (same L1 as single-block) — we're slicing the same buffer into 2
-    // slots of Kt/2 tiles each. DST is held across both kb iterations inside
-    // a single tile_regs_acquire window, so partial sums accumulate naturally.
-    // Requires Kt to be even; falls back to single block otherwise.
-    uint32_t num_k_blocks = (Kt % 2 == 0) ? 2 : 1;
-    uint32_t in0_block_w = Kt / num_k_blocks;
+    // Single K block per matmul. Multi-block pipelining was tried (2 blocks,
+    // same L1 footprint) but the extra cb_wait/cb_pop sync overhead in compute
+    // plus the doubled async_read_barrier cost in reader/writer outweighed
+    // the DMA-vs-compute overlap gain — DMA is not the bottleneck here.
+    uint32_t in0_block_w = Kt;
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -82,16 +79,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto weight_df = tt::DataFormat::Bfp2_b;
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
-    // Circular buffers — total size = num_k_blocks × in0_block_w tiles = Kt.
-    // With num_k_blocks=2 this gives us 2 slots so the reader/writer can
-    // fill slot[kb+1] while compute consumes slot[kb]. L1 footprint is
-    // identical to the single-block case (same total tile count).
-    uint32_t cb0_tiles = num_k_blocks * in0_block_w;
+    // Circular buffers — single-K-block, 1× depth.
+    uint32_t cb0_tiles = in0_block_w;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    uint32_t cb1_tiles = num_k_blocks * in0_block_w * nt_per_core;
+    uint32_t cb1_tiles = in0_block_w * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
@@ -117,7 +111,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
     auto out_accessor = TensorAccessorArgs(*output.buffer());
 
-    std::vector<uint32_t> reader_ct_args;
+    // Kt/Mt/in0_block_w are compile-time so the inner loops unroll and
+    // tile_id arithmetic folds into constants.
+    std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
     {
         auto act_ct = act_accessor.get_compile_time_args();
         reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
@@ -134,8 +130,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
 
     for (uint32_t i = 0; i < num_cores; ++i) {
         SetRuntimeArgs(program, reader_id, cores[i], {
-            activation.buffer()->address(),
-            Kt, Mt, in0_block_w
+            activation.buffer()->address()
         });
     }
 
@@ -150,7 +145,11 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .compile_args = {Mt, Kt, nt_per_core, in0_block_w}});
 
     // === Writer (BRISC, NOC_0): weight reads + output writes ===
-    std::vector<uint32_t> writer_ct_args = {static_cast<uint32_t>(tt::CBIndex::c_16)};
+    // Kt/Nt/Mt/nt_count/in0_block_w are compile-time; only nt_start varies
+    // per core (can't be compile-time without one kernel per core).
+    std::vector<uint32_t> writer_ct_args = {
+        static_cast<uint32_t>(tt::CBIndex::c_16),
+        Kt, Nt, Mt, nt_per_core, in0_block_w};
     {
         auto packed_ct = packed_accessor.get_compile_time_args();
         auto out_ct = out_accessor.get_compile_time_args();
@@ -172,7 +171,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         SetRuntimeArgs(program, writer_id, cores[i], {
             output.buffer()->address(),
             packed_weight.buffer()->address(),
-            Kt, Nt, Mt, nt_start, nt_per_core, in0_block_w
+            nt_start
         });
     }
 
