@@ -45,7 +45,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // num_k_blocks so that in0_block_w (= matmul_block's kt_dim) is ≤ 128.
     // CB sizes stay the same (total tiles = Kt) — splitting only changes
     // how compute iterates.
-    constexpr uint32_t KT_SAFE_THRESHOLD = 80;
+    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
     uint32_t num_k_blocks = 1;
     uint32_t in0_block_w = Kt;
     if (Kt > KT_SAFE_THRESHOLD) {
@@ -57,6 +57,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             }
         }
     }
+    const bool allow_high_nt_per_core = (num_k_blocks == 1);
 
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
@@ -69,12 +70,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     constexpr uint32_t MAX_NT_PER_CORE = 8;
     constexpr uint32_t MIN_NT_PER_CORE = 2;
     uint32_t num_cores = 1;
-    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-        if (Nt % c == 0) {
-            uint32_t npc = Nt / c;
-            if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                num_cores = c;
-                break;
+    if (allow_high_nt_per_core) {
+        for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
+            if (Nt % c == 0) {
+                uint32_t npc = Nt / c;
+                if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
+                    num_cores = c;
+                    break;
+                }
             }
         }
     }
