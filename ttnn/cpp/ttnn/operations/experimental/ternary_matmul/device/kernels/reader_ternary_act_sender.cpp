@@ -98,6 +98,10 @@ void kernel_main() {
                     block_bytes,
                     num_mcast_dests,
                     /*linked=*/false);
+                // Wait for the data mcast to actually arrive before the
+                // sem mcast (the receiver spinning on the sem would see
+                // VALID before its cb0 data is valid otherwise).
+                noc_async_write_barrier();
 
                 // Signal data ready on every receiver.
                 const uint64_t mcast_sem_addr = get_noc_multicast_addr(
@@ -108,11 +112,6 @@ void kernel_main() {
                     receiver_sem_addr,
                     mcast_sem_addr,
                     num_mcast_dests);
-
-                // Wait for the multicast writes to actually COMPLETE at the
-                // destinations (not just be issued) before this kernel
-                // returns. Without this, in-flight mcast traffic can land
-                // on dispatcher L1 after the program ends → CQ corruption.
                 noc_async_write_barrier();
             }
 
