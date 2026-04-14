@@ -86,14 +86,10 @@ void kernel_main() {
 
             // Multicast the whole block to every receiver's cb_in0.
             if constexpr (num_mcast_dests > 0) {
-                // Use NOC_0 explicitly for the multicast so it doesn't
-                // collide with this kernel's NOC_1 activation reads.
-                constexpr uint8_t MCAST_NOC = 0;
                 const uint64_t mcast_dest_addr = get_noc_multicast_addr(
                     mcast_x_start, mcast_y_start,
                     mcast_x_end,   mcast_y_end,
-                    cb0_wr_ptr,
-                    MCAST_NOC);
+                    cb0_wr_ptr);
                 const uint32_t block_bytes = in0_block_w * act_page_bytes;
 
                 noc_async_write_multicast(
@@ -101,23 +97,23 @@ void kernel_main() {
                     mcast_dest_addr,
                     block_bytes,
                     num_mcast_dests,
-                    /*linked=*/false,
-                    MCAST_NOC);
-                noc_async_writes_flushed(MCAST_NOC);
+                    /*linked=*/false);
 
-                // Signal data ready on every receiver via the same NoC so
-                // ordering is preserved.
+                // Signal data ready on every receiver.
                 const uint64_t mcast_sem_addr = get_noc_multicast_addr(
                     mcast_x_start, mcast_y_start,
                     mcast_x_end,   mcast_y_end,
-                    receiver_sem_addr,
-                    MCAST_NOC);
+                    receiver_sem_addr);
                 noc_semaphore_set_multicast(
                     receiver_sem_addr,
                     mcast_sem_addr,
-                    num_mcast_dests,
-                    /*linked=*/false,
-                    MCAST_NOC);
+                    num_mcast_dests);
+
+                // Wait for the multicast writes to actually COMPLETE at the
+                // destinations (not just be issued) before this kernel
+                // returns. Without this, in-flight mcast traffic can land
+                // on dispatcher L1 after the program ends → CQ corruption.
+                noc_async_write_barrier();
             }
 
             cb0.push_back(in0_block_w);
