@@ -66,20 +66,23 @@ void kernel_main() {
     // only write bytes [64..319] of each tile, so the exp bytes must be
     // valid before compute's unpacker reads a slot.
     //
+    // This runs unconditionally: between ternary_matmul invocations the CB1
+    // L1 region can be reused by other kernels so we can't persist state.
+    // The slot count is compile-time (Kt × nt_count), which lets the
+    // compiler flatten both loops into straight-line stores.
+    //
     // An earlier "probe + skip if already 0x7F" optimisation was unsafe:
     // on Blackhole L1 can come up with bytes that already look like 0x7F
     // at the probe address, so the init was occasionally skipped while
-    // other slots still held garbage exp bytes → NaN matmul output. The
-    // symptom was shape-dependent (NaN at Kt=216 multi-core, clean at
-    // smaller K). Running the fill unconditionally is cheap (a few μs
-    // per core, in parallel across all cores) and guarantees correctness.
+    // other slots still held garbage exp bytes → NaN matmul output.
     {
+        constexpr uint32_t cb1_num_slots = Kt * nt_count;
         const uint32_t cb1_base = get_write_ptr(cb_in1);
-        const uint32_t cb1_num_slots = get_local_cb_interface(cb_in1).fifo_num_pages;
         for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
             volatile tt_l1_ptr uint32_t* exp_ptr =
                 reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
                     cb1_base + slot * BFP2_TILE_BYTES);
+            #pragma GCC unroll 16
             for (uint32_t i = 0; i < BFP2_EXP_BYTES / 4; ++i) {
                 exp_ptr[i] = EXP_FILL_WORD;
             }
