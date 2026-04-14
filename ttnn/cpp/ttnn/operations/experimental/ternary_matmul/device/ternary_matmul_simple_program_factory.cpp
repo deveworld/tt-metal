@@ -50,8 +50,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // matmul_block path (possibly dynamic throttle reconfig interacting
     // with Bfp2_b unpack). Guard the heuristic on Kt ≤ 128 until a proper
     // upstream fix lands.
-    constexpr uint32_t KT_HEURISTIC_MAX = 128;
-    const bool allow_high_nt_per_core = (Kt <= KT_HEURISTIC_MAX);
+    // DEBUG: temporarily remove Kt guard to exercise the failing path
+    const bool allow_high_nt_per_core = true;
 
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
