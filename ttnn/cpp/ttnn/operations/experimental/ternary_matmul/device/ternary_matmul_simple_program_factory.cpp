@@ -167,13 +167,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
         }
 
+        // Activation reader on BRISC/NOC_0 (production in0 sender pattern).
         reader_id = CreateKernel(
             program,
             "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
             core_set,
             DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = NOC::RISCV_1_default,
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
                 .compile_args = reader_ct_args});
 
         SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
@@ -228,8 +229,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_sender.cpp",
             sender_set,
             DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = NOC::RISCV_1_default,
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
                 .compile_args = sender_ct_args});
         SetCommonRuntimeArgs(program, sender_id, {activation.buffer()->address()});
 
@@ -255,8 +256,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
                 "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_receiver.cpp",
                 recv_set,
                 DataMovementConfig{
-                    .processor = DataMovementProcessor::RISCV_1,
-                    .noc = NOC::RISCV_1_default,
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = NOC::RISCV_0_default,
                     .compile_args = recv_ct_args});
         }
     }
@@ -284,13 +285,18 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         writer_ct_args.insert(writer_ct_args.end(), out_ct.begin(), out_ct.end());
     }
 
+    // Weight reads + output writes on NCRISC/NOC_1. The activation reader
+    // (or mcast sender/receiver) lives on BRISC/NOC_0 — this split mirrors
+    // production matmul where the in0 sender must run on BRISC so its
+    // multicast writes use NOC_0 (multicast does not work reliably from
+    // NCRISC on Blackhole).
     auto writer_id = CreateKernel(
         program,
         "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/writer_ternary_weight_out.cpp",
         core_set,
         DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default,
+            .processor = DataMovementProcessor::RISCV_1,
+            .noc = NOC::RISCV_1_default,
             .compile_args = writer_ct_args});
 
     // Output and weight DRAM addresses are shared — common runtime args.
