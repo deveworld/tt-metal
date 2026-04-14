@@ -38,26 +38,20 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // K-block sizing: matmul_block's LLK MOP path has a bug with Bfp2_b in
-    // multi-core mode when kt_dim > ~128 and ct_dim ≥ 2 (produces NaN).
-    // To both (a) unlock the nt_per_core≥2 distribution for large-K shapes
-    // and (b) stay below the LLK failure threshold, split Kt into
-    // num_k_blocks so that in0_block_w (= matmul_block's kt_dim) is ≤ 128.
-    // CB sizes stay the same (total tiles = Kt) — splitting only changes
-    // how compute iterates.
-    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
+    // Single K block per matmul. Multi-block pipelining was tried but didn't
+    // help (barrier overhead cancelled the DMA/compute overlap gain since
+    // compute was not the bottleneck anyway).
     uint32_t num_k_blocks = 1;
     uint32_t in0_block_w = Kt;
-    if (Kt > KT_SAFE_THRESHOLD) {
-        for (uint32_t nkb = 2; nkb <= Kt; ++nkb) {
-            if (Kt % nkb == 0 && (Kt / nkb) <= KT_SAFE_THRESHOLD) {
-                num_k_blocks = nkb;
-                in0_block_w = Kt / nkb;
-                break;
-            }
-        }
-    }
-    const bool allow_high_nt_per_core = (num_k_blocks == 1);
+    // Nt-heuristic safety gate: raising nt_per_core≥2 (= matmul_block ct_dim
+    // ≥2) in multi-core mode corrupts the matmul output with NaN when
+    // Kt > 128 — reproducibly at Kt=216 (down_proj), clean up to Kt=128 via
+    // empirical bisection. Root cause is somewhere in the Blackhole LLK
+    // matmul_block path (possibly dynamic throttle reconfig interacting
+    // with Bfp2_b unpack). Guard the heuristic on Kt ≤ 128 until a proper
+    // upstream fix lands.
+    constexpr uint32_t KT_HEURISTIC_MAX = 128;
+    const bool allow_high_nt_per_core = (Kt <= KT_HEURISTIC_MAX);
 
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
