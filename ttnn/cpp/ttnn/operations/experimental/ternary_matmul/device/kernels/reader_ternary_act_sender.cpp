@@ -85,11 +85,17 @@ void kernel_main() {
             noc_async_read_barrier();
 
             // Multicast the whole block to every receiver's cb_in0.
+            // Use NOC_0 explicitly: mcast writes are the "heavy" operation
+            // and running them on NOC_0 leaves this kernel's NOC_1 DRAM
+            // reads free for the next iteration. Production in0 sender
+            // kernels run on BRISC/NOC_0 for this reason.
             if constexpr (num_mcast_dests > 0) {
+                constexpr uint8_t MCAST_NOC = 0;
                 const uint64_t mcast_dest_addr = get_noc_multicast_addr(
                     mcast_x_start, mcast_y_start,
                     mcast_x_end,   mcast_y_end,
-                    cb0_wr_ptr);
+                    cb0_wr_ptr,
+                    MCAST_NOC);
                 const uint32_t block_bytes = in0_block_w * act_page_bytes;
 
                 noc_async_write_multicast(
@@ -97,22 +103,25 @@ void kernel_main() {
                     mcast_dest_addr,
                     block_bytes,
                     num_mcast_dests,
-                    /*linked=*/false);
-                // Wait for the data mcast to actually arrive before the
-                // sem mcast (the receiver spinning on the sem would see
-                // VALID before its cb0 data is valid otherwise).
-                noc_async_write_barrier();
+                    /*linked=*/false,
+                    MCAST_NOC);
+                // Ensure data reaches destinations BEFORE the sem write,
+                // so receivers spinning on the sem see valid cb0 data.
+                noc_async_write_barrier(MCAST_NOC);
 
                 // Signal data ready on every receiver.
                 const uint64_t mcast_sem_addr = get_noc_multicast_addr(
                     mcast_x_start, mcast_y_start,
                     mcast_x_end,   mcast_y_end,
-                    receiver_sem_addr);
+                    receiver_sem_addr,
+                    MCAST_NOC);
                 noc_semaphore_set_multicast(
                     receiver_sem_addr,
                     mcast_sem_addr,
-                    num_mcast_dests);
-                noc_async_write_barrier();
+                    num_mcast_dests,
+                    /*linked=*/false,
+                    MCAST_NOC);
+                noc_async_write_barrier(MCAST_NOC);
             }
 
             cb0.push_back(in0_block_w);
