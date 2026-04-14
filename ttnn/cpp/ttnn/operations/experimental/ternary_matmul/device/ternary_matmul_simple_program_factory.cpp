@@ -14,6 +14,7 @@
 #include <tt-metalium/tensor_accessor_args.hpp>
 
 #include "ttnn/operations/cb_utils.hpp"
+#include <tt-logger/tt-logger.hpp>
 
 namespace ttnn::experimental::prim {
 
@@ -194,6 +195,22 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         uint32_t mcast_x_end   = bot_right_phys.x;
         uint32_t mcast_y_end   = bot_right_phys.y;
         uint32_t num_mcast_dests = num_cores - 1;  // receivers only
+
+        // DEBUG: dump the physical rectangle + per-core mapping to diagnose
+        // the CQ-corruption hang.
+        log_info(tt::LogOp,
+            "[ternary_mcast] Kt={} Nt={} logical_grid=({}, {}) rect=({} rows x {} cols) "
+            "num_cores={} rect_top_left_phys=({}, {}) rect_bot_right_phys=({}, {}) "
+            "num_mcast_dests={}",
+            Kt, Nt, device_grid.x, device_grid.y, rect_rows, rect_cols,
+            num_cores, top_left_phys.x, top_left_phys.y,
+            bot_right_phys.x, bot_right_phys.y, num_mcast_dests);
+        for (uint32_t i = 0; i < num_cores; ++i) {
+            auto phys = activation.device()->worker_core_from_logical_core(cores[i]);
+            log_info(tt::LogOp,
+                "[ternary_mcast]   core[{}] logical=({}, {}) phys=({}, {})",
+                i, cores[i].x, cores[i].y, phys.x, phys.y);
+        }
 
         // Sender kernel (core 0 only).
         std::vector<uint32_t> sender_ct_args = {
