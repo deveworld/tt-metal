@@ -171,10 +171,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .compile_args = writer_ct_args});
 
     // Output and weight DRAM addresses are shared — common runtime args.
-    // Only nt_start differs per core, so that stays as a per-core arg.
+    // init_exp=1 here is the ONE-TIME cb1 exponent fill trigger; override
+    // flips it to 0 on program-cache hits so subsequent launches skip the
+    // 64-byte-per-slot L1 init.
     SetCommonRuntimeArgs(program, writer_id, {
         output.buffer()->address(),
-        packed_weight.buffer()->address()
+        packed_weight.buffer()->address(),
+        1u  // init_exp
     });
     for (uint32_t i = 0; i < num_cores; ++i) {
         uint32_t nt_start = i * nt_per_core;
@@ -205,6 +208,9 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
         auto& writer_common = GetCommonRuntimeArgs(program, shared.writer_kernel_id);
         writer_common[0] = output.buffer()->address();
         writer_common[1] = inputs.weight_tensor.buffer()->address();
+        // Cache hit: cb1's L1 region was filled by the first launch, don't
+        // redo the ~6-7k volatile stores per core every step.
+        writer_common[2] = 0u;
     }
 }
 
