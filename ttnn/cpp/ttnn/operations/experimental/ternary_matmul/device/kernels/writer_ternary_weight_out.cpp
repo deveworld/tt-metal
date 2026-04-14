@@ -59,7 +59,18 @@ void kernel_main() {
     experimental::CircularBuffer cb1(cb_in1);
     experimental::CircularBuffer cbo(out_cb_idx);
 
-    // DEBUG: always-init 0x7F exp (drop L1 probe cache to test race hypothesis)
+    // Fill the 64-byte exponent block of every cb1 slot with 0x7F (encoded
+    // exponent for 2^0 = 1) once per kernel launch. The mantissa DMAs below
+    // only write bytes [64..319] of each tile, so the exp bytes must be
+    // valid before compute's unpacker reads a slot.
+    //
+    // An earlier "probe + skip if already 0x7F" optimisation was unsafe:
+    // on Blackhole L1 can come up with bytes that already look like 0x7F
+    // at the probe address, so the init was occasionally skipped while
+    // other slots still held garbage exp bytes → NaN matmul output. The
+    // symptom was shape-dependent (NaN at Kt=216 multi-core, clean at
+    // smaller K). Running the fill unconditionally is cheap (a few μs
+    // per core, in parallel across all cores) and guarantees correctness.
     {
         const uint32_t cb1_base = get_write_ptr(cb_in1);
         const uint32_t cb1_num_slots = get_local_cb_interface(cb_in1).fifo_num_pages;

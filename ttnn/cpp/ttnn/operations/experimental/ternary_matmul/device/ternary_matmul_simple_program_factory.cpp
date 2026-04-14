@@ -43,15 +43,6 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     // compute was not the bottleneck anyway).
     uint32_t num_k_blocks = 1;
     uint32_t in0_block_w = Kt;
-    // Nt-heuristic safety gate: raising nt_per_core≥2 (= matmul_block ct_dim
-    // ≥2) in multi-core mode corrupts the matmul output with NaN when
-    // Kt > 128 — reproducibly at Kt=216 (down_proj), clean up to Kt=128 via
-    // empirical bisection. Root cause is somewhere in the Blackhole LLK
-    // matmul_block path (possibly dynamic throttle reconfig interacting
-    // with Bfp2_b unpack). Guard the heuristic on Kt ≤ 128 until a proper
-    // upstream fix lands.
-    // DEBUG: temporarily remove Kt guard to exercise the failing path
-    const bool allow_high_nt_per_core = true;
 
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
@@ -64,18 +55,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     constexpr uint32_t MAX_NT_PER_CORE = 8;
     constexpr uint32_t MIN_NT_PER_CORE = 2;
     uint32_t num_cores = 1;
-    if (allow_high_nt_per_core) {
-        for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-            if (Nt % c == 0) {
-                uint32_t npc = Nt / c;
-                if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                    num_cores = c;
-                    break;
-                }
+    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
+        if (Nt % c == 0) {
+            uint32_t npc = Nt / c;
+            if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
+                num_cores = c;
+                break;
             }
         }
     }
-    // Fallback: largest divisor of Nt ≤ max_cores (old behaviour).
+    // Fallback: largest divisor of Nt ≤ max_cores.
     if (num_cores == 1) {
         for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
             if (Nt % c == 0) { num_cores = c; break; }
