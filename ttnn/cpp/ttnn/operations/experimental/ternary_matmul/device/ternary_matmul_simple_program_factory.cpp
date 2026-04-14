@@ -55,34 +55,71 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;
     constexpr uint32_t MIN_NT_PER_CORE = 2;
-    uint32_t num_cores = 1;
+
+    // Option A (L-shape): largest Nt divisor ≤ max_cores with nt_per_core in
+    // [MIN, MAX]. More cores → shorter compute tail. Can't multicast.
+    uint32_t lshape_cores = 1;
     for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
         if (Nt % c == 0) {
             uint32_t npc = Nt / c;
             if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                num_cores = c;
+                lshape_cores = c;
                 break;
             }
         }
     }
-    // Fallback: largest divisor of Nt ≤ max_cores (when Nt is small or prime).
-    if (num_cores == 1) {
+    if (lshape_cores == 1) {
         for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-            if (Nt % c == 0) { num_cores = c; break; }
+            if (Nt % c == 0) { lshape_cores = c; break; }
         }
     }
+
+    // Option B (rectangular): largest rows × cols ≤ grid with same Nt
+    // divisibility and nt_per_core constraints. Rect enables activation
+    // multicast — one core reads DRAM, broadcasts block to the rest.
+    uint32_t rect_cores = 1, rect_rows = 1, rect_cols = 1;
+    for (uint32_t r = 1; r <= device_grid.y; ++r) {
+        for (uint32_t c = 1; c <= device_grid.x; ++c) {
+            uint32_t total = r * c;
+            if (total > Nt || total > max_cores) continue;
+            if (Nt % total != 0) continue;
+            uint32_t npc = Nt / total;
+            if (npc < MIN_NT_PER_CORE || npc > MAX_NT_PER_CORE) continue;
+            if (total > rect_cores) {
+                rect_cores = total;
+                rect_rows = r;
+                rect_cols = c;
+            }
+        }
+    }
+
+    // Prefer multicast only when rectangular layout doesn't sacrifice cores.
+    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 2);
+    uint32_t num_cores = use_mcast ? rect_cores : lshape_cores;
     uint32_t nt_per_core = Nt / num_cores;
 
-    // Build per-core ranges (each core is its own range for safety)
-    std::set<CoreRange> core_ranges;
+    // Build core list + CoreRangeSet. Rect layout uses a single CoreRange;
+    // L-shape builds one CoreRange per core (irregular placement safety).
     std::vector<CoreCoord> cores;
     cores.reserve(num_cores);
-    for (uint32_t i = 0; i < num_cores; ++i) {
-        CoreCoord c = {i % device_grid.x, i / device_grid.x};
-        cores.push_back(c);
-        core_ranges.insert(CoreRange(c, c));
+    CoreRangeSet core_set;
+    if (use_mcast) {
+        for (uint32_t r = 0; r < rect_rows; ++r) {
+            for (uint32_t c = 0; c < rect_cols; ++c) {
+                cores.push_back({c, r});
+            }
+        }
+        core_set = CoreRangeSet(std::set<CoreRange>{
+            CoreRange({0, 0}, {rect_cols - 1, rect_rows - 1})});
+    } else {
+        std::set<CoreRange> core_ranges;
+        for (uint32_t i = 0; i < num_cores; ++i) {
+            CoreCoord c = {i % device_grid.x, i / device_grid.x};
+            cores.push_back(c);
+            core_ranges.insert(CoreRange(c, c));
+        }
+        core_set = CoreRangeSet(core_ranges);
     }
-    CoreRangeSet core_set(core_ranges);
 
     // Data formats
     auto act_df = datatype_to_dataformat_converter(activation.dtype());
@@ -113,30 +150,99 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
-    // === Reader (NCRISC, NOC_1): activation reads only ===
+    // === Reader kernel(s) (NCRISC, NOC_1): activation reads ===
     auto act_accessor = TensorAccessorArgs(*activation.buffer());
     auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
     auto out_accessor = TensorAccessorArgs(*output.buffer());
 
-    // Kt/Mt/in0_block_w are compile-time so the inner loops unroll and
-    // tile_id arithmetic folds into constants.
-    std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
-    {
-        auto act_ct = act_accessor.get_compile_time_args();
-        reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+    KernelHandle reader_id = 0;         // unicast reader
+    KernelHandle sender_id = 0;         // mcast sender
+    KernelHandle receiver_id = 0;       // mcast receivers
+
+    if (!use_mcast) {
+        std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
+        {
+            auto act_ct = act_accessor.get_compile_time_args();
+            reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+        }
+
+        reader_id = CreateKernel(
+            program,
+            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
+            core_set,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_1,
+                .noc = NOC::RISCV_1_default,
+                .compile_args = reader_ct_args});
+
+        SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
+    } else {
+        // Sender on core[0]=(0,0); receivers on the rest of the rect.
+        // Semaphores allocated on every core of core_set so they live at
+        // the same L1 offset across the rectangle.
+        uint32_t sender_sem_id = CreateSemaphore(program, core_set, 0);
+        uint32_t receiver_sem_id = CreateSemaphore(
+            program, core_set, static_cast<uint32_t>(INVALID));
+
+        // Multicast rectangle in physical NoC coords.
+        auto top_left_phys = activation.device()->worker_core_from_logical_core(
+            CoreCoord{0, 0});
+        auto bot_right_phys = activation.device()->worker_core_from_logical_core(
+            CoreCoord{rect_cols - 1, rect_rows - 1});
+        uint32_t mcast_x_start = top_left_phys.x;
+        uint32_t mcast_y_start = top_left_phys.y;
+        uint32_t mcast_x_end   = bot_right_phys.x;
+        uint32_t mcast_y_end   = bot_right_phys.y;
+        uint32_t num_mcast_dests = num_cores - 1;  // receivers only
+
+        // Sender kernel (core 0 only).
+        std::vector<uint32_t> sender_ct_args = {
+            Kt, Mt, in0_block_w,
+            mcast_x_start, mcast_y_start, mcast_x_end, mcast_y_end,
+            num_mcast_dests,
+            sender_sem_id, receiver_sem_id};
+        {
+            auto act_ct = act_accessor.get_compile_time_args();
+            sender_ct_args.insert(sender_ct_args.end(), act_ct.begin(), act_ct.end());
+        }
+        CoreRangeSet sender_set(std::set<CoreRange>{CoreRange{{0, 0}, {0, 0}}});
+        sender_id = CreateKernel(
+            program,
+            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_sender.cpp",
+            sender_set,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_1,
+                .noc = NOC::RISCV_1_default,
+                .compile_args = sender_ct_args});
+        SetCommonRuntimeArgs(program, sender_id, {activation.buffer()->address()});
+
+        // Receiver kernel (all cores except (0,0)).
+        if (num_mcast_dests > 0) {
+            auto sender_phys = activation.device()->worker_core_from_logical_core(
+                CoreCoord{0, 0});
+            std::vector<uint32_t> recv_ct_args = {
+                Kt, Mt, in0_block_w,
+                static_cast<uint32_t>(sender_phys.x),
+                static_cast<uint32_t>(sender_phys.y),
+                sender_sem_id, receiver_sem_id};
+
+            // All cores except (0,0). Use individual ranges so we don't
+            // accidentally include the sender.
+            std::set<CoreRange> recv_ranges;
+            for (uint32_t i = 1; i < num_cores; ++i) {
+                recv_ranges.insert(CoreRange(cores[i], cores[i]));
+            }
+            CoreRangeSet recv_set(recv_ranges);
+            receiver_id = CreateKernel(
+                program,
+                "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_receiver.cpp",
+                recv_set,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_1,
+                    .noc = NOC::RISCV_1_default,
+                    .compile_args = recv_ct_args});
+        }
     }
-
-    auto reader_id = CreateKernel(
-        program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
-        core_set,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_1,
-            .noc = NOC::RISCV_1_default,
-            .compile_args = reader_ct_args});
-
-    // Activation address is shared across all cores — use common runtime args.
-    SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
 
     // === Compute kernel ===
     auto compute_id = CreateKernel(
@@ -181,7 +287,14 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         SetRuntimeArgs(program, writer_id, cores[i], {nt_start});
     }
 
-    return {std::move(program), {reader_id, compute_id, writer_id, cores}};
+    return {std::move(program), {
+        reader_id,
+        sender_id,
+        receiver_id,
+        compute_id,
+        writer_id,
+        use_mcast,
+        cores}};
 }
 
 void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
@@ -197,7 +310,12 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     // All buffer addresses are common runtime args — updating them is a
     // single write per kernel, not once per core. Per-core nt_start doesn't
     // depend on addresses so it stays as set at program creation.
-    {
+    if (shared.use_mcast) {
+        auto& sender_common = GetCommonRuntimeArgs(program, shared.sender_kernel_id);
+        sender_common[0] = inputs.input_tensor.buffer()->address();
+        // Receiver kernel has no common args — activation never goes through
+        // it directly.
+    } else {
         auto& reader_common = GetCommonRuntimeArgs(program, shared.reader_kernel_id);
         reader_common[0] = inputs.input_tensor.buffer()->address();
     }
