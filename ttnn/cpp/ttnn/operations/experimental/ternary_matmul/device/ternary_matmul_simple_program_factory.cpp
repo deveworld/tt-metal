@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Simple single-core ternary matmul program factory.
-// Reads packed 2-bit ternary weights, unpacks to bf16, runs dense matmul.
-// Single core only — for correctness validation (Track A).
+// Multi-core ternary matmul program factory.
+// Reads packed 2-bit (BFP2_b) ternary weights via the Tensix unpacker and
+// runs a block matmul. Dual-NoC split: NCRISC/NOC_1 reads activations,
+// BRISC/NOC_0 reads weights and writes outputs. Weight tensor stores only
+// the 256-byte mantissa per tile; the constant 0x7F exponent block is
+// synthesized in L1 by the writer kernel.
 
 #include "ternary_matmul_simple_program_factory.hpp"
 
@@ -38,18 +41,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Single K block per matmul. Multi-block pipelining was tried but didn't
-    // help (barrier overhead cancelled the DMA/compute overlap gain since
-    // compute was not the bottleneck anyway).
-    uint32_t num_k_blocks = 1;
+    // Single K block per matmul. Multi-block pipelining was tried but the
+    // extra cb_wait/cb_pop sync cancelled the DMA/compute overlap gain —
+    // compute is not the bottleneck at these shapes.
     uint32_t in0_block_w = Kt;
 
-    // Multi-core: distribute Nt tiles across compute grid.
+    // Multi-core: distribute Nt tiles across the compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
-    // the output block (ct_dim) per call, amortizing that overhead better
+    // the output block (ct_dim) per call and amortises that overhead better
     // than spreading work over more cores that each do nt=1. We prefer
-    // nt_per_core ≥ 2 when Nt is divisible; capped at 8 for the half-sync
-    // dest register limit.
+    // nt_per_core ∈ [2, 8]; cap is the half-sync dest register limit.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;
@@ -64,14 +65,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             }
         }
     }
-    // Fallback: largest divisor of Nt ≤ max_cores.
+    // Fallback: largest divisor of Nt ≤ max_cores (when Nt is small or prime).
     if (num_cores == 1) {
         for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
             if (Nt % c == 0) { num_cores = c; break; }
         }
     }
     uint32_t nt_per_core = Nt / num_cores;
-    bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -95,28 +95,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto weight_df = tt::DataFormat::Bfp2_b;
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
-    // Circular buffers — total size = num_k_blocks × in0_block_w = Kt tiles.
-    // With num_k_blocks > 1 this gives multiple slots so reader/writer can
-    // fill slot[kb+1] while compute consumes slot[kb]. L1 footprint is
-    // identical to the single-block case (same total tile count).
-    uint32_t cb0_tiles = num_k_blocks * in0_block_w;
+    // CB0 (activation): Kt tiles so compute can wait once for the full K.
     CreateCircularBuffer(program, core_set,
-        CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
+        CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    uint32_t cb1_tiles = num_k_blocks * in0_block_w * nt_per_core;
+    // CB1 (weight): Kt × nt_per_core BFP2_b tiles.
+    uint32_t cb1_tiles = Kt * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
-
-    // CB3: activation L1 cache for legacy reader (holds all Kt tiles)
-    // Only needed for legacy loop; fast loop reads act once via CB0.
-    if (!use_fast_loop) {
-        uint32_t cb3_tiles = Kt;
-        CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(cb3_tiles * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
-                .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
-    }
 
     // CB16: output tiles (bf16). Sized to hold all Nt tiles so compute can
     // push the full output block without waiting for the writer to drain.
@@ -147,11 +135,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .noc = NOC::RISCV_1_default,
             .compile_args = reader_ct_args});
 
-    for (uint32_t i = 0; i < num_cores; ++i) {
-        SetRuntimeArgs(program, reader_id, cores[i], {
-            activation.buffer()->address()
-        });
-    }
+    // Activation address is shared across all cores — use common runtime args.
+    SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
 
     // === Compute kernel ===
     auto compute_id = CreateKernel(
@@ -185,13 +170,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             .noc = NOC::RISCV_0_default,
             .compile_args = writer_ct_args});
 
+    // Output and weight DRAM addresses are shared — common runtime args.
+    // Only nt_start differs per core, so that stays as a per-core arg.
+    SetCommonRuntimeArgs(program, writer_id, {
+        output.buffer()->address(),
+        packed_weight.buffer()->address()
+    });
     for (uint32_t i = 0; i < num_cores; ++i) {
         uint32_t nt_start = i * nt_per_core;
-        SetRuntimeArgs(program, writer_id, cores[i], {
-            output.buffer()->address(),
-            packed_weight.buffer()->address(),
-            nt_start
-        });
+        SetRuntimeArgs(program, writer_id, cores[i], {nt_start});
     }
 
     return {std::move(program), {reader_id, compute_id, writer_id, cores}};
@@ -207,16 +194,17 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     auto& program = cached_program.program;
     auto& shared = cached_program.shared_variables;
 
-    // Update ALL cores' buffer addresses for program cache reuse.
-    // Reader (NCRISC): only the activation address.
-    // Writer (BRISC): output address + weight address.
-    for (const auto& core : shared.cores) {
-        auto& reader_args = GetRuntimeArgs(program, shared.reader_kernel_id, core);
-        reader_args[0] = inputs.input_tensor.buffer()->address();
-
-        auto& writer_args = GetRuntimeArgs(program, shared.writer_kernel_id, core);
-        writer_args[0] = output.buffer()->address();
-        writer_args[1] = inputs.weight_tensor.buffer()->address();
+    // All buffer addresses are common runtime args — updating them is a
+    // single write per kernel, not once per core. Per-core nt_start doesn't
+    // depend on addresses so it stays as set at program creation.
+    {
+        auto& reader_common = GetCommonRuntimeArgs(program, shared.reader_kernel_id);
+        reader_common[0] = inputs.input_tensor.buffer()->address();
+    }
+    {
+        auto& writer_common = GetCommonRuntimeArgs(program, shared.writer_kernel_id);
+        writer_common[0] = output.buffer()->address();
+        writer_common[1] = inputs.weight_tensor.buffer()->address();
     }
 }
 

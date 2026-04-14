@@ -18,10 +18,12 @@
 //   6..: weight TensorAccessorArgs
 //   following: out TensorAccessorArgs
 //
-// Runtime args:
+// Common runtime args (shared by all cores):
 //   0: out_addr      DRAM address of output tensor
 //   1: packed_addr   DRAM base of mantissa-only weight tensor
-//   2: nt_start      (per-core; only this one varies between cores)
+//
+// Per-core runtime args:
+//   0: nt_start      first N tile assigned to this core
 
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
@@ -35,9 +37,9 @@ constexpr uint32_t BFP2_MAN_BYTES  = 256;
 constexpr uint32_t EXP_FILL_WORD   = 0x7F7F7F7Fu;
 
 void kernel_main() {
-    uint32_t out_addr    = get_arg_val<uint32_t>(0);
-    uint32_t packed_addr = get_arg_val<uint32_t>(1);
-    uint32_t nt_start    = get_arg_val<uint32_t>(2);
+    uint32_t out_addr    = get_common_arg_val<uint32_t>(0);
+    uint32_t packed_addr = get_common_arg_val<uint32_t>(1);
+    uint32_t nt_start    = get_arg_val<uint32_t>(0);
 
     constexpr uint32_t out_cb_idx = get_compile_time_arg_val(0);
     constexpr uint32_t Kt          = get_compile_time_arg_val(1);

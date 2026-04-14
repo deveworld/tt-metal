@@ -9,7 +9,7 @@
 //   2: in0_block_w
 //   3..: activation TensorAccessorArgs
 //
-// Runtime args:
+// Common runtime args (shared by all cores):
 //   0: act_addr
 
 #include <cstdint>
@@ -19,7 +19,7 @@
 #include "experimental/tensor.h"
 
 void kernel_main() {
-    uint32_t act_addr = get_arg_val<uint32_t>(0);
+    uint32_t act_addr = get_common_arg_val<uint32_t>(0);
 
     constexpr uint32_t Kt          = get_compile_time_arg_val(0);
     constexpr uint32_t Mt          = get_compile_time_arg_val(1);
