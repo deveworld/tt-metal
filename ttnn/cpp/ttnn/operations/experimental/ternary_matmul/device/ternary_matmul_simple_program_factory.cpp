@@ -38,35 +38,47 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
+    // K-block sizing: matmul_block's LLK MOP path has a bug with Bfp2_b in
+    // multi-core mode when kt_dim > ~128 and ct_dim ≥ 2 (produces NaN).
+    // To both (a) unlock the nt_per_core≥2 distribution for large-K shapes
+    // and (b) stay below the LLK failure threshold, split Kt into
+    // num_k_blocks so that in0_block_w (= matmul_block's kt_dim) is ≤ 128.
+    // CB sizes stay the same (total tiles = Kt) — splitting only changes
+    // how compute iterates.
+    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
+    uint32_t num_k_blocks = 1;
+    uint32_t in0_block_w = Kt;
+    if (Kt > KT_SAFE_THRESHOLD) {
+        for (uint32_t nkb = 2; nkb <= Kt; ++nkb) {
+            if (Kt % nkb == 0 && (Kt / nkb) <= KT_SAFE_THRESHOLD) {
+                num_k_blocks = nkb;
+                in0_block_w = Kt / nkb;
+                break;
+            }
+        }
+    }
+
     // Multi-core: distribute Nt tiles across compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
     // the output block (ct_dim) per call, amortizing that overhead better
     // than spreading work over more cores that each do nt=1. We prefer
     // nt_per_core ≥ 2 when Nt is divisible; capped at 8 for the half-sync
     // dest register limit.
-    //
-    // KT_SAFE_THRESHOLD: with Kt > 128 we've observed NaN output from the
-    // Bfp2_b multi-core matmul_block path when ct_dim ≥ 2 (suspected LLK
-    // MOP/address-gen issue specific to large kt_dim with >1 core). Fall
-    // back to the legacy (nt_per_core=1) distribution in that regime.
     auto device_grid = activation.device()->compute_with_storage_grid_size();
     uint32_t max_cores = device_grid.x * device_grid.y;
     constexpr uint32_t MAX_NT_PER_CORE = 8;
     constexpr uint32_t MIN_NT_PER_CORE = 2;
-    constexpr uint32_t KT_SAFE_THRESHOLD = 128;
     uint32_t num_cores = 1;
-    if (Kt <= KT_SAFE_THRESHOLD) {
-        for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
-            if (Nt % c == 0) {
-                uint32_t npc = Nt / c;
-                if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
-                    num_cores = c;
-                    break;
-                }
+    for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
+        if (Nt % c == 0) {
+            uint32_t npc = Nt / c;
+            if (npc >= MIN_NT_PER_CORE && npc <= MAX_NT_PER_CORE) {
+                num_cores = c;
+                break;
             }
         }
     }
-    // Fallback / Kt > threshold path: largest divisor of Nt ≤ max_cores.
+    // Fallback: largest divisor of Nt ≤ max_cores (old behaviour).
     if (num_cores == 1) {
         for (uint32_t c = std::min(Nt, max_cores); c >= 1; --c) {
             if (Nt % c == 0) { num_cores = c; break; }
@@ -74,12 +86,6 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
     uint32_t nt_per_core = Nt / num_cores;
     bool use_fast_loop = (nt_per_core <= MAX_NT_PER_CORE);
-
-    // Single K block per matmul. Multi-block pipelining was tried (2 blocks,
-    // same L1 footprint) but the extra cb_wait/cb_pop sync overhead in compute
-    // plus the doubled async_read_barrier cost in reader/writer outweighed
-    // the DMA-vs-compute overlap gain — DMA is not the bottleneck here.
-    uint32_t in0_block_w = Kt;
 
     // Build per-core ranges (each core is its own range for safety)
     std::set<CoreRange> core_ranges;
@@ -103,13 +109,16 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     auto weight_df = tt::DataFormat::Bfp2_b;
     uint32_t weight_tile_bytes = tile_size(weight_df);
 
-    // Circular buffers — single-K-block, 1× depth.
-    uint32_t cb0_tiles = in0_block_w;
+    // Circular buffers — total size = num_k_blocks × in0_block_w = Kt tiles.
+    // With num_k_blocks > 1 this gives multiple slots so reader/writer can
+    // fill slot[kb+1] while compute consumes slot[kb]. L1 footprint is
+    // identical to the single-block case (same total tile count).
+    uint32_t cb0_tiles = num_k_blocks * in0_block_w;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb0_tiles * act_tile_bytes, {{tt::CBIndex::c_0, act_df}})
             .set_page_size(tt::CBIndex::c_0, act_tile_bytes));
 
-    uint32_t cb1_tiles = in0_block_w * nt_per_core;
+    uint32_t cb1_tiles = num_k_blocks * in0_block_w * nt_per_core;
     CreateCircularBuffer(program, core_set,
         CircularBufferConfig(cb1_tiles * weight_tile_bytes, {{tt::CBIndex::c_1, weight_df}})
             .set_page_size(tt::CBIndex::c_1, weight_tile_bytes));
