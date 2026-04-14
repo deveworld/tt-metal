@@ -53,10 +53,12 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
 
-    // Single K block per matmul. Multi-block pipelining was tried but the
-    // extra cb_wait/cb_pop sync cancelled the DMA/compute overlap gain —
-    // compute is not the bottleneck at these shapes.
-    uint32_t in0_block_w = Kt;
+    // K-block pipelining: split Kt into 2 blocks so cb0/cb1 (sized for the
+    // full Kt) become double-buffered — while compute drains block A, the
+    // reader/writer can DMA block B. Previous attempt was perf-neutral but
+    // was measured before the BRISC sender fix and the full QKV-to-ternary
+    // integration; worth retrying now.
+    uint32_t in0_block_w = (Kt % 2 == 0 && Kt >= 4) ? (Kt / 2) : Kt;
 
     // Multi-core: distribute Nt tiles across the compute grid.
     // Each matmul_block call has fixed overhead; raising nt_per_core widens
