@@ -21,7 +21,6 @@
 // Common runtime args (shared by all cores):
 //   0: out_addr      DRAM address of output tensor
 //   1: packed_addr   DRAM base of mantissa-only weight tensor
-//   2: init_exp      1 on first program launch (fill cb1 exp block), 0 after
 //
 // Per-core runtime args:
 //   0: nt_start      first N tile assigned to this core
@@ -40,7 +39,6 @@ constexpr uint32_t EXP_FILL_WORD   = 0x7F7F7F7Fu;
 void kernel_main() {
     uint32_t out_addr    = get_common_arg_val<uint32_t>(0);
     uint32_t packed_addr = get_common_arg_val<uint32_t>(1);
-    uint32_t init_exp    = get_common_arg_val<uint32_t>(2);
     uint32_t nt_start    = get_arg_val<uint32_t>(0);
 
     constexpr uint32_t out_cb_idx = get_compile_time_arg_val(0);
@@ -64,21 +62,18 @@ void kernel_main() {
     experimental::CircularBuffer cbo(out_cb_idx);
 
     // Fill the 64-byte exponent block of every cb1 slot with 0x7F (encoded
-    // exponent for 2^0 = 1). The mantissa DMAs below only write bytes
-    // [64..319] of each tile, so the exp bytes must be valid before
-    // compute's unpacker reads a slot.
+    // exponent for 2^0 = 1) once per kernel launch. The mantissa DMAs below
+    // only write bytes [64..319] of each tile, so the exp bytes must be
+    // valid before compute's unpacker reads a slot.
     //
-    // Host drives init_exp: 1 on the first launch of a freshly cached
-    // program, 0 on subsequent launches. Between launches of the same
-    // cached program the CB1 L1 region belongs to us, so the exp bytes
-    // remain intact from the previous fill. Skipping the re-init saves
-    // ~cb1_num_slots × 16 volatile stores per launch on every core.
-    //
-    // (Previous attempts to self-detect first launch via an L1 probe
-    // failed on Blackhole: un-touched L1 sometimes comes up with bytes
-    // that already look like 0x7F, causing a false-positive skip and NaN
-    // output. Driving it from host is reliable.)
-    if (init_exp) {
+    // An earlier "probe + skip if already 0x7F" optimisation was unsafe:
+    // on Blackhole L1 can come up with bytes that already look like 0x7F
+    // at the probe address, so the init was occasionally skipped while
+    // other slots still held garbage exp bytes → NaN matmul output. The
+    // symptom was shape-dependent (NaN at Kt=216 multi-core, clean at
+    // smaller K). Running the fill unconditionally is cheap (a few μs
+    // per core, in parallel across all cores) and guarantees correctness.
+    {
         const uint32_t cb1_base = get_write_ptr(cb_in1);
         const uint32_t cb1_num_slots = get_local_cb_interface(cb_in1).fifo_num_pages;
         for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
