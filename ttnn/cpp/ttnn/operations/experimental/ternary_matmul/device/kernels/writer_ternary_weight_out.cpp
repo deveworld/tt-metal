@@ -77,7 +77,7 @@ void kernel_main() {
         }
     }
 
-    const uint32_t num_k_blocks = Kt / in0_block_w;
+    constexpr uint32_t num_k_blocks = Kt / in0_block_w;
 
     // Phase 1: per-K-block weight reads, mirroring reader_ternary_mc.cpp.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
