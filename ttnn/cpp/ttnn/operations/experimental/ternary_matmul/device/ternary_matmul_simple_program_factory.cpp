@@ -179,9 +179,9 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
                 .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
 
-        // CB4 (sq): Kt tiles — all squared tiles for reduce_tile_to_cb.
+        // CB4 (sq scratch): 1 tile for squared tile during accumulation.
         CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_4, act_df}})
+            CircularBufferConfig(1 * act_tile_bytes, {{tt::CBIndex::c_4, act_df}})
                 .set_page_size(tt::CBIndex::c_4, act_tile_bytes));
 
         // CB5 (sqsum): 2 tiles — ping-pong for running sum / rsqrt scalar.
