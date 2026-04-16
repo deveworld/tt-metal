@@ -99,7 +99,8 @@ void kernel_main() {
     // Uses moreh's reduce_tile_to_cb which accumulates across tiles via
     // repeated reduce_tile calls into DST[0], then packs once.
     // Result: cb_sqsum[0] = mean(x²) (REDUCE_SCALAR with 1/K scaler).
-    reduce_tile_to_cb(cb_sq, cb_scaler, cb_sqsum, Kt);
+    // pop0=Kt to pop all squared tiles; pop1=1 to wait for (but not pop) the scaler.
+    reduce_tile_to_cb(cb_sq, cb_scaler, cb_sqsum, Kt, Kt, 1);
 
     // Step 1c: Add epsilon and compute rsqrt.
     // DST[0] = rsqrt(mean(x²) + eps) = 1 / RMS(x)
