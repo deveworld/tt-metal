@@ -169,6 +169,7 @@ void kernel_main() {
         tile_regs_acquire();
         cb_wait_front(cb_sqsum, 1);
 
+        reconfig_data_format(cb_sqsum, cb_eps);
         add_tiles_init(cb_sqsum, cb_eps);
         add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
 
@@ -202,11 +203,13 @@ void kernel_main() {
         tile_regs_acquire();
 
         // DST[0] = raw[t] * rsqrt_scalar  (broadcast scalar multiply)
+        reconfig_data_format(cb_raw, cb_sqsum);
         mul_tiles_bcast_scalar_init_short(cb_raw, cb_sqsum);
         mul_tiles_bcast_scalar(cb_raw, cb_sqsum, t, 0, 0);
 
-        // DST[0] *= gamma'[t]  (element-wise, gamma in-place via dest reuse)
+        // DST[0] *= gamma[t]  (element-wise, gamma in-place via dest reuse)
         cb_wait_front(cb_gamma, 1);
+        reconfig_data_format(cb_gamma, cb_gamma);
         binary_dest_reuse_tiles_init<EltwiseBinaryType::ELWMUL,
                                      EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_gamma);
         binary_dest_reuse_tiles<EltwiseBinaryType::ELWMUL,
