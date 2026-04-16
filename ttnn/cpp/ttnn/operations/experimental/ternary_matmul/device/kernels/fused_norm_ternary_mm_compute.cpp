@@ -215,10 +215,12 @@ void kernel_main() {
         cb_pop_front(cb_gamma, 1);
     }
 
-    // Clean up phase 1-2 CBs.
+    // Clean up phase 1-2 CBs. All must be popped so the reader can
+    // re-push them on the next invocation (trace replay or program re-run).
     cb_pop_front(cb_raw, Kt);
     cb_pop_front(cb_sqsum, 1);
-    // cb_scaler and cb_eps are never popped (persistent constants).
+    cb_pop_front(cb_scaler, 1);
+    cb_pop_front(cb_eps, 1);
 
     // ==================================================================
     // Phase 3: Block matmul — cb_in0 × cb_in1 → cb_out
