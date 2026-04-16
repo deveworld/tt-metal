@@ -124,40 +124,43 @@ void kernel_main() {
     }
 
     // Step 1b: Reduce the accumulated sum tile to a scalar with 1/K scaler.
+    // Use cb_sq as output (separate from input cb_sqsum) — matching moreh pattern.
     {
         tile_regs_acquire();
         cb_wait_front(cb_sqsum, 1);
-        reduce_init_delta_with_dt(cb_sqsum, cb_sqsum, cb_scaler);
+        cb_reserve_back(cb_sq, 1);
+
+        reduce_init_delta_with_dt(cb_sq, cb_sqsum, cb_scaler);
         reduce_tile(cb_sqsum, cb_scaler, 0, 0, 0);
         reduce_uninit();
-        cb_pop_front(cb_sqsum, 1);
-        cb_reserve_back(cb_sqsum, 1);
         tile_regs_commit();
+
         tile_regs_wait();
-        pack_tile_with_dt(0, cb_sqsum);
-        cb_push_back(cb_sqsum, 1);
+        pack_tile_with_dt(0, cb_sq);
+
+        cb_pop_front(cb_sqsum, 1);
+        cb_push_back(cb_sq, 1);
         tile_regs_release();
     }
 
     // Step 1c: Add epsilon and compute rsqrt.
-    // DST[0] = rsqrt(mean(x²) + eps) = 1 / RMS(x)
+    // cb_sq has the mean(x²) scalar. Output rsqrt to cb_sqsum.
     {
         tile_regs_acquire();
-        cb_wait_front(cb_sqsum, 1);
+        cb_wait_front(cb_sq, 1);
+        cb_reserve_back(cb_sqsum, 1);
 
-        add_tiles_init_with_dt(cb_sqsum, cb_eps);
-        add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
+        add_tiles_init_with_dt(cb_sq, cb_eps);
+        add_tiles(cb_sq, cb_eps, 0, 0, 0);
 
         rsqrt_tile_init();
         rsqrt_tile(0);
-
-        // Store rsqrt scalar in cb_sqsum (reuse as cb_rsqrt).
-        cb_pop_front(cb_sqsum, 1);
-        cb_reserve_back(cb_sqsum, 1);
         tile_regs_commit();
 
         tile_regs_wait();
         pack_tile_with_dt(0, cb_sqsum);
+
+        cb_pop_front(cb_sq, 1);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
@@ -167,11 +170,8 @@ void kernel_main() {
     // ==================================================================
     // Phase 2: Normalize — raw[t] * rsqrt_scalar * gamma[t] → cb_in0
     // ==================================================================
-    // The scaler CB (1/K) in the reduce step already handled the 1/K
-    // division, so cb_sqsum holds rsqrt(mean(x²) + eps) = 1/RMS.
-    // Standard gamma is used directly — no pre-scaling needed.
 
-    cb_wait_front(cb_sqsum, 1);  // rsqrt scalar stays in CB throughout
+    cb_wait_front(cb_sqsum, 1);
 
     for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
