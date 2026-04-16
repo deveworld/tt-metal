@@ -71,6 +71,9 @@ void kernel_main() {
     constexpr auto cb_eps    = tt::CBIndex::c_7;
     constexpr auto cb_out    = tt::CBIndex::c_16;
 
+    // Initialize tile format registers (required before any compute ops).
+    binary_op_init_common(cb_raw, cb_raw, cb_out);
+
     // ==================================================================
     // Phase 1: RMSNorm — compute rsqrt(mean(x²) + eps)
     // ==================================================================
