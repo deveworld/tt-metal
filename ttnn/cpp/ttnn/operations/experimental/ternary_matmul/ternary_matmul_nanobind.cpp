@@ -136,7 +136,9 @@ void bind_ternary_matmul(nb::module_& mod) {
         nb::arg("memory_config") = nb::none(),
         nb::arg("dtype") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
-        nb::arg("use_packed_ternary") = false);
+        nb::arg("use_packed_ternary") = false,
+        nb::arg("norm_weight") = nb::none(),
+        nb::arg("norm_epsilon") = nb::none());
 
     auto py_ternary_matmul_config = nb::class_<TernaryMatmulConfig>(
                                         mod,

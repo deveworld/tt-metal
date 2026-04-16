@@ -24,6 +24,7 @@ struct TernaryMatmulSimpleProgramFactory {
         tt::tt_metal::KernelHandle compute_kernel_id;
         tt::tt_metal::KernelHandle writer_kernel_id;
         bool use_mcast;
+        bool fuse_norm;
         std::vector<CoreCoord> cores;
     };
 

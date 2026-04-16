@@ -20,7 +20,9 @@ ttnn::Tensor ternary_matmul(
     const std::optional<MemoryConfig>& memory_config,
     std::optional<const DataType> dtype,
     std::optional<DeviceComputeKernelConfig> compute_kernel_config,
-    bool use_packed_ternary) {
+    bool use_packed_ternary,
+    const std::optional<ttnn::Tensor>& norm_weight,
+    std::optional<float> norm_epsilon) {
     // Call device operation with chunks=1 (default), which returns a vector with 1 element
     auto outputs = ttnn::prim::ternary_matmul(
         input_tensor,
@@ -36,7 +38,9 @@ ttnn::Tensor ternary_matmul(
         /*fused_ternary_scalar=*/std::nullopt,
         /*fused_ternary_input_a=*/std::nullopt,
         /*fused_ternary_input_b=*/std::nullopt,
-        use_packed_ternary);
+        use_packed_ternary,
+        norm_weight,
+        norm_epsilon);
 
     // Extract and return the single output
     TT_FATAL(outputs.size() == 1, "Expected single output from ternary_matmul, got {}", outputs.size());

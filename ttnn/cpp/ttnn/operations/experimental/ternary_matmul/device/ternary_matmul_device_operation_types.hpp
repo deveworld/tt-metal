@@ -38,6 +38,11 @@ struct TernaryMatmulParams {
     // Packed ternary weight mode: weight is uint32 ROW_MAJOR with 2-bit packed ternary values.
     // Selects TernaryMatmulSimpleProgramFactory (single-core, reader unpacks to bf16).
     bool use_packed_ternary = false;
+
+    // Fused RMSNorm: when norm_epsilon is set and norm_weight is provided in
+    // TernaryMatmulInputs, the kernel computes RMSNorm(input) * gamma before
+    // the matmul, eliminating a separate kernel launch.
+    std::optional<float> norm_epsilon;
 };
 
 struct TernaryMatmulInputs {
@@ -49,6 +54,10 @@ struct TernaryMatmulInputs {
     // Fused addcmul: ternary_a + scalar * matmul_output * ternary_b
     std::optional<Tensor> fused_ternary_input_a;  // residual/base (broadcast like bias)
     std::optional<Tensor> fused_ternary_input_b;  // gate/multiplier (full MxN shape)
+
+    // Fused RMSNorm gamma weight (1D, shape [K]). When provided together with
+    // norm_epsilon in TernaryMatmulParams, the compute kernel fuses the norm.
+    std::optional<Tensor> norm_weight;
 };
 
 }  // namespace ttnn::experimental::prim

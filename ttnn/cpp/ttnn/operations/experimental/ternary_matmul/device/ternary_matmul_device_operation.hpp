@@ -49,7 +49,9 @@ struct TernaryMatmulDeviceOperation {
         int32_t dim = -1,
         std::optional<float> fused_ternary_scalar = std::nullopt,
         const std::optional<Tensor>& fused_ternary_input_a = std::nullopt,
-        const std::optional<Tensor>& fused_ternary_input_b = std::nullopt);
+        const std::optional<Tensor>& fused_ternary_input_b = std::nullopt,
+        const std::optional<Tensor>& norm_weight = std::nullopt,
+        std::optional<float> norm_epsilon = std::nullopt);
 };
 
 }  // namespace ttnn::experimental::prim
@@ -70,6 +72,8 @@ std::vector<Tensor> ternary_matmul(
     std::optional<float> fused_ternary_scalar = std::nullopt,
     const std::optional<Tensor>& fused_ternary_input_a = std::nullopt,
     const std::optional<Tensor>& fused_ternary_input_b = std::nullopt,
-    bool use_packed_ternary = false);
+    bool use_packed_ternary = false,
+    const std::optional<Tensor>& norm_weight = std::nullopt,
+    std::optional<float> norm_epsilon = std::nullopt);
 
 }  // namespace ttnn::prim

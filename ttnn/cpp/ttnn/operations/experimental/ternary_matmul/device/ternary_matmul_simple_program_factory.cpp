@@ -21,6 +21,7 @@
 
 #include "ternary_matmul_simple_program_factory.hpp"
 
+#include <cstring>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/math.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
@@ -33,7 +34,7 @@ using namespace tt::tt_metal;
 using namespace tt::constants;
 
 TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFactory::create(
-    const TernaryMatmulParams& /*params*/,
+    const TernaryMatmulParams& params,
     const TernaryMatmulInputs& inputs,
     std::vector<Tensor>& output_tensors) {
 
@@ -164,7 +165,42 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         CircularBufferConfig(cb16_tiles * out_tile_bytes, {{tt::CBIndex::c_16, out_df}})
             .set_page_size(tt::CBIndex::c_16, out_tile_bytes));
 
-    // === Reader kernel(s) (NCRISC, NOC_1): activation reads ===
+    // === Fused RMSNorm CBs (only when norm_weight is provided) ===
+    bool fuse_norm = inputs.norm_weight.has_value() && params.norm_epsilon.has_value();
+    if (fuse_norm) {
+        // CB2 (raw activation): Kt tiles — compute reads by index for
+        // sum-of-squares, then pops during normalization.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_2, act_df}})
+                .set_page_size(tt::CBIndex::c_2, act_tile_bytes));
+
+        // CB3 (gamma): 2 tiles double-buffered — reader streams, compute pops.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
+                .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
+
+        // CB4 (sq scratch): 1 tile — temp for squared tile during accumulation.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(1 * act_tile_bytes, {{tt::CBIndex::c_4, act_df}})
+                .set_page_size(tt::CBIndex::c_4, act_tile_bytes));
+
+        // CB5 (sqsum): 2 tiles — ping-pong for running sum / rsqrt scalar.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_5, act_df}})
+                .set_page_size(tt::CBIndex::c_5, act_tile_bytes));
+
+        // CB6 (scaler): 1 tile of 1/K — filled by reader, never popped.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(1 * act_tile_bytes, {{tt::CBIndex::c_6, act_df}})
+                .set_page_size(tt::CBIndex::c_6, act_tile_bytes));
+
+        // CB7 (epsilon): 1 tile of eps — filled by reader, never popped.
+        CreateCircularBuffer(program, core_set,
+            CircularBufferConfig(1 * act_tile_bytes, {{tt::CBIndex::c_7, act_df}})
+                .set_page_size(tt::CBIndex::c_7, act_tile_bytes));
+    }
+
+    // === Reader kernel(s) (BRISC, NOC_0): activation reads ===
     auto act_accessor = TensorAccessorArgs(*activation.buffer());
     auto packed_accessor = TensorAccessorArgs(*packed_weight.buffer());
     auto out_accessor = TensorAccessorArgs(*output.buffer());
@@ -174,23 +210,62 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     KernelHandle receiver_id = 0;       // mcast receivers
 
     if (!use_mcast) {
-        std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
-        {
-            auto act_ct = act_accessor.get_compile_time_args();
-            reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+        if (fuse_norm) {
+            // Fused norm reader: reads activation → cb_raw, fills constant
+            // tiles (scaler, eps), and streams gamma → cb_gamma.
+            auto gamma_accessor = TensorAccessorArgs(*inputs.norm_weight->buffer());
+
+            std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
+            {
+                auto act_ct = act_accessor.get_compile_time_args();
+                reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+            }
+            {
+                auto gamma_ct = gamma_accessor.get_compile_time_args();
+                reader_ct_args.insert(reader_ct_args.end(), gamma_ct.begin(), gamma_ct.end());
+            }
+
+            reader_id = CreateKernel(
+                program,
+                "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_norm_act.cpp",
+                core_set,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = NOC::RISCV_0_default,
+                    .compile_args = reader_ct_args});
+
+            // Compute 1/K as float32 bit-pattern and epsilon as float32 bit-pattern.
+            float inv_K = 1.0f / static_cast<float>(K);
+            float eps = params.norm_epsilon.value();
+            uint32_t inv_K_u32, eps_u32;
+            std::memcpy(&inv_K_u32, &inv_K, sizeof(uint32_t));
+            std::memcpy(&eps_u32, &eps, sizeof(uint32_t));
+
+            SetCommonRuntimeArgs(program, reader_id, {
+                activation.buffer()->address(),
+                inputs.norm_weight->buffer()->address(),
+                inv_K_u32,
+                eps_u32
+            });
+        } else {
+            // Standard unicast reader: reads activation → cb0.
+            std::vector<uint32_t> reader_ct_args = {Kt, Mt, in0_block_w};
+            {
+                auto act_ct = act_accessor.get_compile_time_args();
+                reader_ct_args.insert(reader_ct_args.end(), act_ct.begin(), act_ct.end());
+            }
+
+            reader_id = CreateKernel(
+                program,
+                "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
+                core_set,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = NOC::RISCV_0_default,
+                    .compile_args = reader_ct_args});
+
+            SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
         }
-
-        // Activation reader on BRISC/NOC_0 (production in0 sender pattern).
-        reader_id = CreateKernel(
-            program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_only.cpp",
-            core_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
-                .noc = NOC::RISCV_0_default,
-                .compile_args = reader_ct_args});
-
-        SetCommonRuntimeArgs(program, reader_id, {activation.buffer()->address()});
     } else {
         // Sender on core[0]=(0,0); receivers on the rest of the rect.
         // Semaphores allocated on every core of core_set so they live at
@@ -260,9 +335,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // === Compute kernel ===
+    std::string compute_kernel_path = fuse_norm
+        ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/fused_norm_ternary_mm_compute.cpp"
+        : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp";
+
     auto compute_id = CreateKernel(
         program,
-        "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/ternary_mm_compute.cpp",
+        compute_kernel_path,
         core_set,
         ComputeConfig{
             .math_fidelity = MathFidelity::LoFi,
@@ -314,6 +393,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         compute_id,
         writer_id,
         use_mcast,
+        fuse_norm,
         cores}};
 }
 
@@ -338,6 +418,10 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     } else {
         auto& reader_common = GetCommonRuntimeArgs(program, shared.reader_kernel_id);
         reader_common[0] = inputs.input_tensor.buffer()->address();
+        if (shared.fuse_norm && inputs.norm_weight.has_value()) {
+            reader_common[1] = inputs.norm_weight->buffer()->address();
+            // [2] and [3] (inv_K and eps) are constants, unchanged.
+        }
     }
     {
         auto& writer_common = GetCommonRuntimeArgs(program, shared.writer_kernel_id);

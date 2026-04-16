@@ -324,7 +324,9 @@ std::vector<Tensor> ternary_matmul(
     std::optional<float> fused_ternary_scalar,
     const std::optional<Tensor>& fused_ternary_input_a,
     const std::optional<Tensor>& fused_ternary_input_b,
-    bool use_packed_ternary) {
+    bool use_packed_ternary,
+    const std::optional<Tensor>& norm_weight,
+    std::optional<float> norm_epsilon) {
     using OperationType = experimental::prim::TernaryMatmulDeviceOperation;
     const auto arch = input_tensor.device()->arch();
     auto kernel_config_val = init_device_compute_kernel_config(
@@ -346,14 +348,16 @@ std::vector<Tensor> ternary_matmul(
             .compute_kernel_config = kernel_config_val,
             .chunks = chunks,
             .dim = dim,
-            .use_packed_ternary = use_packed_ternary},
+            .use_packed_ternary = use_packed_ternary,
+            .norm_epsilon = norm_epsilon},
         OperationType::tensor_args_t{
             .input_tensor = input_tensor,
             .weight_tensor = weight_tensor,
             .bias_tensor = bias_tensor,
             .optional_input_tensor = std::nullopt,
             .fused_ternary_input_a = fused_ternary_input_a,
-            .fused_ternary_input_b = fused_ternary_input_b});
+            .fused_ternary_input_b = fused_ternary_input_b,
+            .norm_weight = norm_weight});
 }
 
 }  // namespace ttnn::prim

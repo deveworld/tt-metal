@@ -30,5 +30,7 @@ ttnn::Tensor ternary_matmul(
     const std::optional<MemoryConfig>& memory_config = std::nullopt,
     std::optional<const DataType> dtype = std::nullopt,
     std::optional<ttnn::DeviceComputeKernelConfig> compute_kernel_config = std::nullopt,
-    bool use_packed_ternary = false);
+    bool use_packed_ternary = false,
+    const std::optional<ttnn::Tensor>& norm_weight = std::nullopt,
+    std::optional<float> norm_epsilon = std::nullopt);
 }
