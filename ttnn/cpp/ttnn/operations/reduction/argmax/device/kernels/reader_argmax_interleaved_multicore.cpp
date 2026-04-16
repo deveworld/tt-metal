@@ -57,46 +57,57 @@ inline void find_argmax_for_core(
             max_val = get_default_value<data_format>();
         }
 
-        for (uint32_t i = red_dim_offset; i < (red_dim_offset + red_dim_units_this_core); ++i) {
-            if constexpr (data_format == DataFormat::Float16_b) {
-                uint16_t val = in_vals[i - red_dim_offset];
-                process_value_comparison<data_format, uint16_t, reduce_all>(
-                    val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint16_t a, uint16_t b) {
-                        return bfloat16_greater(a, b);
-                    });
-
-            } else if constexpr (data_format == DataFormat::UInt16) {
-                uint16_t val = in_vals[i - red_dim_offset];
-                process_value_comparison<data_format, uint16_t, reduce_all>(
-                    val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint16_t a, uint16_t b) {
-                        return a > b;
-                    });
-
-            } else if constexpr (data_format == DataFormat::Float32) {
-                uint32_t val = in_vals[i - red_dim_offset];
-                process_value_comparison<data_format, uint32_t, reduce_all>(
-                    val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint32_t a, uint32_t b) {
-                        return float32_greater(a, b);
-                    });
-
-            } else if constexpr (data_format == DataFormat::Int32) {
-                int32_t val = in_vals[i - red_dim_offset];
-                process_value_comparison<data_format, int32_t, reduce_all>(
-                    val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](int32_t a, int32_t b) {
-                        return int32_greater(a, b);
-                    });
-
-            } else if constexpr (data_format == DataFormat::UInt32) {
-                uint32_t val = in_vals[i - red_dim_offset];
-                process_value_comparison<data_format, uint32_t, reduce_all>(
-                    val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint32_t a, uint32_t b) {
-                        return a > b;
-                    });
-
-            } else {
-                // We need a value-dependent expression (gcc-12) that is not
-                // tautologically false (gcc-15)
-                static_assert(data_format == DataFormat::Float16_b, "Unsupported data format in find_argmax_for_core");
+        if constexpr (data_format == DataFormat::Float16_b && !reduce_all) {
+            // Fast path: branchless orderable bf16 comparison (~4 cycles/element).
+            const uint16_t* data = reinterpret_cast<const uint16_t*>(src_cb_addr);
+            uint16_t best_ord = (max_val & 0x8000) ? (uint16_t)(~max_val) : (uint16_t)(max_val | 0x8000);
+            uint32_t best_i = max_idx;
+            for (uint32_t i = 0; i < red_dim_units_this_core; ++i) {
+                uint16_t raw = data[i];
+                uint16_t ord = (raw & 0x8000) ? (uint16_t)(~raw) : (uint16_t)(raw | 0x8000);
+                if (ord > best_ord) {
+                    best_ord = ord;
+                    best_i = red_dim_offset + i;
+                }
+            }
+            max_idx = best_i;
+            // Convert orderable back to raw bf16 for the reduce phase.
+            max_val = (best_ord & 0x8000) ? (uint16_t)(best_ord & 0x7FFF) : (uint16_t)(~best_ord);
+        } else {
+            for (uint32_t i = red_dim_offset; i < (red_dim_offset + red_dim_units_this_core); ++i) {
+                if constexpr (data_format == DataFormat::Float16_b) {
+                    uint16_t val = in_vals[i - red_dim_offset];
+                    process_value_comparison<data_format, uint16_t, reduce_all>(
+                        val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint16_t a, uint16_t b) {
+                            return bfloat16_greater(a, b);
+                        });
+                } else if constexpr (data_format == DataFormat::UInt16) {
+                    uint16_t val = in_vals[i - red_dim_offset];
+                    process_value_comparison<data_format, uint16_t, reduce_all>(
+                        val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint16_t a, uint16_t b) {
+                            return a > b;
+                        });
+                } else if constexpr (data_format == DataFormat::Float32) {
+                    uint32_t val = in_vals[i - red_dim_offset];
+                    process_value_comparison<data_format, uint32_t, reduce_all>(
+                        val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint32_t a, uint32_t b) {
+                            return float32_greater(a, b);
+                        });
+                } else if constexpr (data_format == DataFormat::Int32) {
+                    int32_t val = in_vals[i - red_dim_offset];
+                    process_value_comparison<data_format, int32_t, reduce_all>(
+                        val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](int32_t a, int32_t b) {
+                            return int32_greater(a, b);
+                        });
+                } else if constexpr (data_format == DataFormat::UInt32) {
+                    uint32_t val = in_vals[i - red_dim_offset];
+                    process_value_comparison<data_format, uint32_t, reduce_all>(
+                        val, max_val, max_idx, i, outer_idx, j, inner_dim_units, red_dim_units, [](uint32_t a, uint32_t b) {
+                            return a > b;
+                        });
+                } else {
+                    static_assert(data_format == DataFormat::Float16_b, "Unsupported data format in find_argmax_for_core");
+                }
             }
         }
 
