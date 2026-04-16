@@ -84,27 +84,74 @@ void kernel_main() {
     cb_wait_front(cb_scaler, 1);
     cb_wait_front(cb_eps, 1);
 
-    // DEBUG: skip Phase 1 computation, use scaler tile (1/K) as the
-    // rsqrt value. This tests whether Phase 2 (bcast+gamma+matmul) works
-    // when given a known-good tile. Output should be raw * (1/K) * gamma.
-    // For all-ones act+gamma, K=32: expected = 32 * (1/32) * 1 = 1 per feature,
-    // matmul with ones weight: 32 * 1 = 32.
-    // TODO: restore Phase 1 after debugging.
-
-    // cb_sqsum = cb_scaler (copy the scaler tile as the "rsqrt" value)
-    {
+    // Step 1a: Square each tile and accumulate element-wise into cb_sqsum.
+    for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
-        cb_reserve_back(cb_sqsum, 1);
-        copy_tile_to_dst_init_short_with_dt(cb_scaler, cb_scaler);
-        copy_tile(cb_scaler, 0, 0);
+        cb_reserve_back(cb_sq, 1);
+        mul_tiles_init_with_dt(cb_raw, cb_raw);
+        mul_tiles(cb_raw, cb_raw, t, t, 0);
         tile_regs_commit();
         tile_regs_wait();
+        pack_tile_with_dt(0, cb_sq);
+        cb_push_back(cb_sq, 1);
+        tile_regs_release();
+
+        if (t == 0) {
+            tile_regs_acquire();
+            cb_wait_front(cb_sq, 1);
+            cb_reserve_back(cb_sqsum, 1);
+            copy_tile_to_dst_init_short_with_dt(cb_sq, cb_sq);
+            copy_tile(cb_sq, 0, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile_with_dt(0, cb_sqsum);
+            cb_pop_front(cb_sq, 1);
+            cb_push_back(cb_sqsum, 1);
+            tile_regs_release();
+        } else {
+            tile_regs_acquire();
+            cb_wait_front(cb_sqsum, 1);
+            cb_wait_front(cb_sq, 1);
+            cb_reserve_back(cb_sqsum, 1);
+            add_tiles_init_with_dt(cb_sqsum, cb_sq);
+            add_tiles(cb_sqsum, cb_sq, 0, 0, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile_with_dt(0, cb_sqsum);
+            cb_pop_front(cb_sqsum, 1);
+            cb_pop_front(cb_sq, 1);
+            cb_push_back(cb_sqsum, 1);
+            tile_regs_release();
+        }
+    }
+
+    // Step 1b: Reduce to scalar. Use moreh's reduce_tile_to_cb pattern
+    // with SEPARATE input/output CBs (cb_sqsum → cb_sq).
+    // Then add eps + rsqrt → cb_sqsum.
+    reduce_tile_to_cb(cb_sqsum, cb_scaler, cb_sq, 1);  // reduce 1 tile
+
+    // Step 1c: Add epsilon and rsqrt.
+    {
+        tile_regs_acquire();
+        cb_wait_front(cb_sq, 1);
+        cb_reserve_back(cb_sqsum, 1);
+
+        add_tiles_init_with_dt(cb_sq, cb_eps);
+        add_tiles(cb_sq, cb_eps, 0, 0, 0);
+
+        rsqrt_tile_init();
+        rsqrt_tile(0);
+        tile_regs_commit();
+
+        tile_regs_wait();
         pack_tile_with_dt(0, cb_sqsum);
+
+        cb_pop_front(cb_sq, 1);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
 
-    // cb_sqsum now has 1/K tile (used as debug rsqrt substitute).
+    // cb_sqsum now has rsqrt(mean(x²) + eps).
 
     // ==================================================================
     // Phase 2: Normalize — raw[t] * rsqrt_scalar * gamma[t] → cb_in0
