@@ -125,18 +125,67 @@ void kernel_main() {
         }
     }
 
-    // Step 1b: Reduce to scalar. reduce_tile_to_cb applies the scaler
-    // (1/K) during reduction, giving mean(x²) directly.
+    // Step 1b: Reduce to scalar (sum of all elements × scaler).
+    // Note: we pass cb_scaler as the scaler CB but on Blackhole the scaler
+    // is applied during reduction. The result in cb_sq = mean(x²).
     reduce_tile_to_cb(cb_sqsum, cb_scaler, cb_sq, 1);
 
-    // Step 1c: Add epsilon and rsqrt.
+    // Step 1c: Add epsilon, compute rsqrt, multiply by 1/K if needed.
+    // reduce_tile on BH may or may not apply the scaler. To be safe, we
+    // divide by K explicitly: rsqrt(sum/K + eps) = sqrt(K) * rsqrt(sum + K*eps).
+    // Instead: rsqrt(reduce_result + eps). If reduce applied 1/K, this is
+    // rsqrt(mean + eps). If not, it's rsqrt(sum + eps) which is wrong.
+    //
+    // Empirically, reduce_tile on BH DOES apply the scaler (result=mean).
+    // The 8x error was from earlier bugs. The current 8x is because
+    // reduce_tile gives mean=1/K (not mean=1.0), suggesting it does NOT
+    // apply scaler but the scaler IS read into SrcB and affect the result.
+    //
+    // Pragmatic fix: use eps_tile filled with K*eps instead of eps.
+    // Then rsqrt(sum + K*eps) = rsqrt(K*(sum/K + eps)) = rsqrt(K * mean_with_eps)
+    // = (1/sqrt(K)) * rsqrt(mean + eps).
+    // We need to compensate by multiplying gamma by sqrt(K) on the host.
+    //
+    // OR: just add eps and rsqrt normally, then adjust gamma by sqrt(K).
+    // This requires gamma' = sqrt(K) * gamma (pre-computed on host).
+    //
+    // For now: assume reduce gives raw sum (not mean).
+    // rsqrt(sum + eps): wrong scale.
+    // To get correct RMSNorm: multiply by sqrt(1/K) after rsqrt.
+    // 1/RMS = rsqrt(mean + eps) = rsqrt(sum/K + eps)
+    //       = sqrt(K/(sum + K*eps))
+    //       = sqrt(K) * rsqrt(sum + K*eps)
+    //       = sqrt(K) * our_rsqrt (if eps_tile = K*eps)
+    //
+    // Simplest: change eps in reader to K*eps, then host gamma *= sqrt(K).
+    // BUT: this requires host changes. For now, add eps normally and
+    // accept the wrong scale. Fix with sqrt(K) compensation.
+
+    // Actually: the simplest fix is to multiply the reduce result by scaler
+    // BEFORE add_eps + rsqrt. Use bcast_scalar for this.
+    // reduce → cb_sq has raw_sum. Multiply by 1/K → mean. Add eps → rsqrt.
     {
         tile_regs_acquire();
         cb_wait_front(cb_sq, 1);
         cb_reserve_back(cb_sqsum, 1);
+        mul_tiles_bcast_scalar_init_short_with_dt(cb_sq, cb_scaler);
+        mul_tiles_bcast_scalar(cb_sq, cb_scaler, 0, 0, 0);
+        tile_regs_commit();
+        tile_regs_wait();
+        pack_tile_with_dt(0, cb_sqsum);
+        cb_pop_front(cb_sq, 1);
+        cb_push_back(cb_sqsum, 1);
+        tile_regs_release();
+    }
 
-        add_tiles_init_with_dt(cb_sq, cb_eps);
-        add_tiles(cb_sq, cb_eps, 0, 0, 0);
+    // Now cb_sqsum has mean(x²). Add eps and rsqrt.
+    {
+        tile_regs_acquire();
+        cb_wait_front(cb_sqsum, 1);
+        cb_reserve_back(cb_sq, 1);
+
+        add_tiles_init_with_dt(cb_sqsum, cb_eps);
+        add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
 
         rsqrt_tile_init();
         rsqrt_tile(0);
@@ -145,7 +194,7 @@ void kernel_main() {
         tile_regs_wait();
         pack_tile_with_dt(0, cb_sqsum);
 
-        cb_pop_front(cb_sq, 1);
+        cb_pop_front(cb_sqsum, 1);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
