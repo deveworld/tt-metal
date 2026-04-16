@@ -25,6 +25,7 @@
 #include "experimental/noc.h"
 #include "experimental/circular_buffer.h"
 #include "experimental/tensor.h"
+#include "ttnn/kernel/dataflow/moreh_common.hpp"
 
 void kernel_main() {
     uint32_t act_addr    = get_common_arg_val<uint32_t>(0);
@@ -56,39 +57,10 @@ void kernel_main() {
     experimental::CircularBuffer cb_gamma_buf(cb_gamma);
 
     // ================================================================
-    // Fill constant tiles: cb_scaler (1/K) and cb_eps (epsilon)
+    // Fill constant tiles using moreh's fill_cb_with_value (proven API)
     // ================================================================
-    // Each tile has 32×32 = 1024 bf16 elements = 2048 bytes. We fill
-    // every element with the same value so reduce_tile and add_tiles
-    // produce correct results regardless of which positions are active.
-    {
-        // cb_scaler: tile filled with 1/K (bf16)
-        // Convert float to bf16: truncate lower 16 bits of float32.
-        uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_u32 >> 16);
-        uint32_t scaler_word = (static_cast<uint32_t>(scaler_bf16) << 16) |
-                                static_cast<uint32_t>(scaler_bf16);
-
-        cb_reserve_back(cb_scaler, 1);
-        volatile tt_l1_ptr uint32_t* scaler_ptr =
-            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_scaler));
-        for (uint32_t i = 0; i < 1024 / 2; ++i) {  // 512 uint32 words = 1024 bf16
-            scaler_ptr[i] = scaler_word;
-        }
-        cb_push_back(cb_scaler, 1);
-
-        // cb_eps: tile filled with epsilon (bf16)
-        uint16_t eps_bf16 = static_cast<uint16_t>(eps_u32 >> 16);
-        uint32_t eps_word = (static_cast<uint32_t>(eps_bf16) << 16) |
-                             static_cast<uint32_t>(eps_bf16);
-
-        cb_reserve_back(cb_eps, 1);
-        volatile tt_l1_ptr uint32_t* eps_ptr =
-            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_eps));
-        for (uint32_t i = 0; i < 1024 / 2; ++i) {
-            eps_ptr[i] = eps_word;
-        }
-        cb_push_back(cb_eps, 1);
-    }
+    fill_cb_with_value(cb_scaler, scaler_u32);
+    fill_cb_with_value(cb_eps, eps_u32);
 
     // ================================================================
     // Read all Kt raw activation tiles into cb_raw (one shot)
