@@ -125,61 +125,45 @@ void kernel_main() {
         }
     }
 
-    // Step 1b: Reduce to scalar (raw sum, scaler may not be applied).
+    // Step 1b: Reduce to scalar. reduce_tile_to_cb applies the scaler
+    // (1/K) during reduction, giving mean(x²) directly.
     reduce_tile_to_cb(cb_sqsum, cb_scaler, cb_sq, 1);
-
-    // Step 1b2: Multiply by 1/K manually to get mean(x²).
-    // reduce_tile_to_cb may ignore the scaler on Blackhole, so we apply it
-    // explicitly via bcast_scalar multiply.
-    {
-        tile_regs_acquire();
-        cb_wait_front(cb_sq, 1);
-        cb_reserve_back(cb_sqsum, 1);
-        mul_tiles_bcast_scalar_init_short_with_dt(cb_sq, cb_scaler);
-        mul_tiles_bcast_scalar(cb_sq, cb_scaler, 0, 0, 0);
-        tile_regs_commit();
-        tile_regs_wait();
-        pack_tile_with_dt(0, cb_sqsum);
-        cb_pop_front(cb_sq, 1);
-        cb_push_back(cb_sqsum, 1);
-        tile_regs_release();
-    }
 
     // Step 1c: Add epsilon and rsqrt.
     {
         tile_regs_acquire();
-        cb_wait_front(cb_sqsum, 1);
-        cb_reserve_back(cb_sq, 1);
+        cb_wait_front(cb_sq, 1);
+        cb_reserve_back(cb_sqsum, 1);
 
-        add_tiles_init_with_dt(cb_sqsum, cb_eps);
-        add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
+        add_tiles_init_with_dt(cb_sq, cb_eps);
+        add_tiles(cb_sq, cb_eps, 0, 0, 0);
 
         rsqrt_tile_init();
         rsqrt_tile(0);
         tile_regs_commit();
 
         tile_regs_wait();
-        pack_tile_with_dt(0, cb_sq);
+        pack_tile_with_dt(0, cb_sqsum);
 
-        cb_pop_front(cb_sqsum, 1);
-        cb_push_back(cb_sq, 1);
+        cb_pop_front(cb_sq, 1);
+        cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
 
-    // cb_sq now has rsqrt(mean(x²) + eps).
+    // cb_sqsum now has rsqrt(mean(x²) + eps).
 
     // ==================================================================
     // Phase 2: Normalize — raw[t] * rsqrt_scalar * gamma[t] → cb_in0
     // ==================================================================
 
-    cb_wait_front(cb_sq, 1);
+    cb_wait_front(cb_sqsum, 1);
 
     for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
 
         // DST[0] = raw[t] * rsqrt_scalar  (broadcast scalar multiply)
-        mul_tiles_bcast_scalar_init_short_with_dt(cb_raw, cb_sq);
-        mul_tiles_bcast_scalar(cb_raw, cb_sq, t, 0, 0);
+        mul_tiles_bcast_scalar_init_short_with_dt(cb_raw, cb_sqsum);
+        mul_tiles_bcast_scalar(cb_raw, cb_sqsum, t, 0, 0);
 
         // DST[0] *= gamma[t]  (element-wise, gamma in-place via dest reuse)
         cb_wait_front(cb_gamma, 1);
@@ -202,7 +186,7 @@ void kernel_main() {
 
     // Clean up phase 1-2 CBs.
     cb_pop_front(cb_raw, Kt);
-    cb_pop_front(cb_sq, 1);
+    cb_pop_front(cb_sqsum, 1);
     cb_pop_front(cb_scaler, 1);
     cb_pop_front(cb_eps, 1);
 
