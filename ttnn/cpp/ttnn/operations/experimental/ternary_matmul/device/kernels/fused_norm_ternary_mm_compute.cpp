@@ -39,10 +39,10 @@
 #include <cstdint>
 
 // reduce.h requires these macros for default template parameters.
-// REDUCE_COL: sum columns within each row → per-row scalar for batch-32
-// Each of the 32 rows is an independent batch element.
+// For batch-32 decode, rows 1-31 are zero-padded so REDUCE_SCALAR
+// gives the correct mean for the single active row.
 #define REDUCE_OP PoolType::SUM
-#define REDUCE_DIM ReduceDim::REDUCE_COL
+#define REDUCE_DIM ReduceDim::REDUCE_SCALAR
 
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/matmul.h"
@@ -135,17 +135,16 @@ void kernel_main() {
         }
     }
 
-    // Step 1b: Reduce columns within each row, multiplied by 1/K.
-    // REDUCE_COL sums across the 32 columns per row independently:
-    //   DST[0][i][0] = sum_j( sqsum[i][j] * scaler[i][j] )
-    //                = (1/K) * row_sum_of_squares = mean(x²) per batch element
-    // This preserves batch independence (each of 32 rows normalizes separately).
+    // Step 1b: Reduce the sum tile to a scalar, multiplied by 1/K.
+    // REDUCE_SCALAR sums all 1024 elements: for batch-32 decode where only
+    // row 0 has real data (rows 1-31 are zeros), this equals mean(x²) for
+    // the active row.
     {
         tile_regs_acquire();
         cb_wait_front(cb_sqsum, 1);
 
-        reduce_init<PoolType::SUM, ReduceDim::REDUCE_COL>(cb_sqsum, cb_scaler, cb_sqsum);
-        reduce_tile<PoolType::SUM, ReduceDim::REDUCE_COL>(cb_sqsum, cb_scaler, 0, 0, 0);
+        reduce_init<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sqsum, cb_scaler, cb_sqsum);
+        reduce_tile<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sqsum, cb_scaler, 0, 0, 0);
         reduce_uninit();
 
         // Pack mean scalar back to cb_sqsum (reuse).
@@ -196,10 +195,9 @@ void kernel_main() {
     for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
 
-        // DST[0] = raw[t] * rsqrt[row]  (broadcast column 0 per row)
-        // Each of the 32 rows gets its own rsqrt scalar from cb_sqsum col 0.
-        mul_bcast_cols_init_short(cb_raw, cb_sqsum);
-        mul_tiles_bcast_cols(cb_raw, cb_sqsum, t, 0, 0);
+        // DST[0] = raw[t] * rsqrt_scalar  (broadcast scalar multiply)
+        mul_tiles_bcast_scalar_init_short(cb_raw, cb_sqsum);
+        mul_tiles_bcast_scalar(cb_raw, cb_sqsum, t, 0, 0);
 
         // DST[0] *= gamma'[t]  (element-wise, gamma in-place via dest reuse)
         cb_wait_front(cb_gamma, 1);
