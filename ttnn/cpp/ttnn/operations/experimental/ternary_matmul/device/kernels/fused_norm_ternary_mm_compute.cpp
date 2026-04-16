@@ -80,82 +80,26 @@ void kernel_main() {
     cb_wait_front(cb_scaler, 1);
     cb_wait_front(cb_eps, 1);
 
-    // Step 1a: Square each tile and accumulate element-wise.
-    // After this loop, cb_sqsum has one tile where each element [i][j] =
-    // sum_{t=0}^{Kt-1}( raw[t][i][j]² ).
+    // Step 1a: Square each tile → push all Kt squared tiles to cb_sq.
     for (uint32_t t = 0; t < Kt; ++t) {
-        // Square: DST[0] = raw[t] * raw[t]  (element-wise)
         tile_regs_acquire();
+        cb_reserve_back(cb_sq, 1);
+
         mul_tiles_init_with_dt(cb_raw, cb_raw);
         mul_tiles(cb_raw, cb_raw, t, t, 0);
         tile_regs_commit();
 
         tile_regs_wait();
-        cb_reserve_back(cb_sq, 1);
         pack_tile_with_dt(0, cb_sq);
         cb_push_back(cb_sq, 1);
         tile_regs_release();
-
-        // Accumulate into cb_sqsum.
-        if (t == 0) {
-            // First tile: copy to cb_sqsum directly.
-            tile_regs_acquire();
-            cb_wait_front(cb_sq, 1);
-            cb_reserve_back(cb_sqsum, 1);
-
-            copy_tile_to_dst_init_short_with_dt(cb_sq, cb_sq);
-            copy_tile(cb_sq, 0, 0);
-            tile_regs_commit();
-
-            tile_regs_wait();
-            pack_tile_with_dt(0, cb_sqsum);
-
-            cb_pop_front(cb_sq, 1);
-            cb_push_back(cb_sqsum, 1);
-            tile_regs_release();
-        } else {
-            // Subsequent tiles: add to running sum.
-            tile_regs_acquire();
-            cb_wait_front(cb_sqsum, 1);
-            cb_wait_front(cb_sq, 1);
-            cb_reserve_back(cb_sqsum, 1);
-
-            add_tiles_init_with_dt(cb_sqsum, cb_sq);
-            add_tiles(cb_sqsum, cb_sq, 0, 0, 0);
-            tile_regs_commit();
-
-            tile_regs_wait();
-            pack_tile_with_dt(0, cb_sqsum);
-
-            cb_pop_front(cb_sqsum, 1);
-            cb_pop_front(cb_sq, 1);
-            cb_push_back(cb_sqsum, 1);
-            tile_regs_release();
-        }
     }
 
-    // Step 1b: Reduce the sum tile to a scalar, multiplied by 1/K.
-    // REDUCE_SCALAR sums all 1024 elements: for batch-32 decode where only
-    // row 0 has real data (rows 1-31 are zeros), this equals mean(x²) for
-    // the active row.
-    {
-        tile_regs_acquire();
-        cb_wait_front(cb_sqsum, 1);
-
-        reduce_init_delta_with_dt(cb_sqsum, cb_sqsum, cb_scaler);
-        reduce_tile(cb_sqsum, cb_scaler, 0, 0, 0);
-        reduce_uninit();
-
-        // Pack mean scalar back to cb_sqsum (reuse).
-        cb_pop_front(cb_sqsum, 1);
-        cb_reserve_back(cb_sqsum, 1);
-        tile_regs_commit();
-
-        tile_regs_wait();
-        pack_tile_with_dt(0, cb_sqsum);
-        cb_push_back(cb_sqsum, 1);
-        tile_regs_release();
-    }
+    // Step 1b: Reduce all Kt squared tiles to a single scalar tile.
+    // Uses moreh's reduce_tile_to_cb which accumulates across tiles via
+    // repeated reduce_tile calls into DST[0], then packs once.
+    // Result: cb_sqsum[0] = mean(x²) (REDUCE_SCALAR with 1/K scaler).
+    reduce_tile_to_cb(cb_sq, cb_scaler, cb_sqsum, Kt);
 
     // Step 1c: Add epsilon and compute rsqrt.
     // DST[0] = rsqrt(mean(x²) + eps) = 1 / RMS(x)
