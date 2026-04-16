@@ -144,7 +144,28 @@ ArgMaxSingleCoreProgramFactory::cached_program_t ArgMaxSingleCoreProgramFactory:
 
     const tt::DataFormat input_data_format = tt::tt_metal::datatype_to_dataformat_converter(input.dtype());
     const tt::DataFormat output_data_format = tt::tt_metal::datatype_to_dataformat_converter(output.dtype());
-    const auto [src_page_size, dst_page_size] = get_page_sizes_single_core(input, output, keepdim, reduce_all);
+    auto [src_page_size, dst_page_size] = get_page_sizes_single_core(input, output, keepdim, reduce_all);
+
+    // Fast-path CB enlargement: for bf16 TILE single-row argmax, the kernel
+    // batch-reads row 0 of ALL tiles into L1 (64 bytes per tile). Enlarge
+    // the source CB to hold this data instead of a single tile.
+    if (input.layout() == Layout::TILE && !reduce_all &&
+        input.dtype() == DataType::BFLOAT16) {
+        const auto& padded = input.padded_shape();
+        const uint32_t r = padded.size();
+        const uint32_t th = input.tensor_spec().tile().get_height();
+        const uint32_t tw = input.tensor_spec().tile().get_width();
+        const uint32_t h_tiles = padded[r - 2] / th;
+        const uint32_t w_tiles = padded[r - 1] / tw;
+        if (h_tiles == 1) {
+            // 64 bytes per tile (row 0 from face0 + face1), round up to 32
+            const uint32_t fast_cb_size = tt::round_up(w_tiles * tw * sizeof(uint16_t), 32);
+            if (fast_cb_size > src_page_size && fast_cb_size <= 512 * 1024) {
+                src_page_size = fast_cb_size;
+            }
+        }
+    }
+
     create_circular_buffers_single_core(
         program,
         all_cores,
