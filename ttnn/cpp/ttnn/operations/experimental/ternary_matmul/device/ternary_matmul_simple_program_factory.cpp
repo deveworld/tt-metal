@@ -107,14 +107,8 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
         }
     }
 
-    // Prefer multicast when the rectangular layout is at least half the
-    // L-shape core count.  In unicast mode every core reads ALL Kt
-    // activation tiles independently from DRAM; with mcast the sender
-    // reads once and broadcasts. For shapes like gate_up (Nt=432,
-    // L-shape=108, rect=72) the activation DRAM amplification
-    // (108× → 1×, saving ~17 MB/layer × 30 layers = 510 MB/step) far
-    // outweighs the 50% higher per-core compute from fewer cores.
-    bool use_mcast = (rect_cores * 2 >= lshape_cores) && (rect_cores >= 2);
+    // Prefer multicast only when rectangular layout doesn't sacrifice cores.
+    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 2);
     uint32_t num_cores = use_mcast ? rect_cores : lshape_cores;
     uint32_t nt_per_core = Nt / num_cores;
 
