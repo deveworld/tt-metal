@@ -72,8 +72,7 @@ void kernel_main() {
     constexpr auto cb_out    = tt::CBIndex::c_16;
 
     // Initialize tile format registers (required before any compute ops).
-    // Match moreh pattern: same CB for both inputs, output CB for packer.
-    binary_op_init_common(cb_raw, cb_raw, cb_out);
+    binary_op_init_common(cb_sqsum, cb_scaler, cb_sq);
 
     // ==================================================================
     // Phase 1: RMSNorm — compute rsqrt(mean(x²) + eps)
@@ -161,31 +160,15 @@ void kernel_main() {
     // BUT: this requires host changes. For now, add eps normally and
     // accept the wrong scale. Fix with sqrt(K) compensation.
 
-    // Actually: the simplest fix is to multiply the reduce result by scaler
-    // BEFORE add_eps + rsqrt. Use bcast_scalar for this.
-    // reduce → cb_sq has raw_sum. Multiply by 1/K → mean. Add eps → rsqrt.
+    // cb_sq now has mean(x²) (reduce applied 1/K scaler).
+    // Add eps and rsqrt.
     {
         tile_regs_acquire();
         cb_wait_front(cb_sq, 1);
         cb_reserve_back(cb_sqsum, 1);
-        mul_tiles_bcast_scalar_init_short_with_dt(cb_sq, cb_scaler);
-        mul_tiles_bcast_scalar(cb_sq, cb_scaler, 0, 0, 0);
-        tile_regs_commit();
-        tile_regs_wait();
-        pack_tile_with_dt(0, cb_sqsum);
-        cb_pop_front(cb_sq, 1);
-        cb_push_back(cb_sqsum, 1);
-        tile_regs_release();
-    }
 
-    // Now cb_sqsum has mean(x²). Add eps and rsqrt.
-    {
-        tile_regs_acquire();
-        cb_wait_front(cb_sqsum, 1);
-        cb_reserve_back(cb_sq, 1);
-
-        add_tiles_init_with_dt(cb_sqsum, cb_eps);
-        add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
+        add_tiles_init_with_dt(cb_sq, cb_eps);
+        add_tiles(cb_sq, cb_eps, 0, 0, 0);
 
         rsqrt_tile_init();
         rsqrt_tile(0);
@@ -194,7 +177,7 @@ void kernel_main() {
         tile_regs_wait();
         pack_tile_with_dt(0, cb_sqsum);
 
-        cb_pop_front(cb_sqsum, 1);
+        cb_pop_front(cb_sq, 1);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
