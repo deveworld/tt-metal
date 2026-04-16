@@ -50,6 +50,7 @@
 #include "api/compute/eltwise_binary.h"
 #include "api/compute/eltwise_unary/rsqrt.h"
 #include "api/compute/bcast.h"
+#include "api/compute/pack.h"
 
 #ifndef ARCH_QUASAR
 #include "experimental/circular_buffer.h"
@@ -93,6 +94,7 @@ void kernel_main() {
 
         tile_regs_wait();
         cb_reserve_back(cb_sq, 1);
+        pack_reconfig_data_format(cb_sq);
         pack_tile(0, cb_sq);
         cb_push_back(cb_sq, 1);
         tile_regs_release();
@@ -109,6 +111,7 @@ void kernel_main() {
             tile_regs_commit();
 
             tile_regs_wait();
+            pack_reconfig_data_format(cb_sqsum);
             pack_tile(0, cb_sqsum);
 
             cb_pop_front(cb_sq, 1);
@@ -126,6 +129,7 @@ void kernel_main() {
             tile_regs_commit();
 
             tile_regs_wait();
+            pack_reconfig_data_format(cb_sqsum);
             pack_tile(0, cb_sqsum);
 
             cb_pop_front(cb_sqsum, 1);
@@ -153,6 +157,7 @@ void kernel_main() {
         tile_regs_commit();
 
         tile_regs_wait();
+        pack_reconfig_data_format(cb_sqsum);
         pack_tile(0, cb_sqsum);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
@@ -176,6 +181,7 @@ void kernel_main() {
         tile_regs_commit();
 
         tile_regs_wait();
+        pack_reconfig_data_format(cb_sqsum);
         pack_tile(0, cb_sqsum);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
@@ -210,6 +216,7 @@ void kernel_main() {
         tile_regs_wait();
 
         cb_reserve_back(cb_in0, 1);
+        pack_reconfig_data_format(cb_in0);
         pack_tile(0, cb_in0);
         cb_push_back(cb_in0, 1);
         tile_regs_release();
