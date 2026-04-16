@@ -38,6 +38,10 @@
 
 #include <cstdint>
 
+// reduce.h requires these macros for default template parameters.
+#define REDUCE_OP PoolType::SUM
+#define REDUCE_DIM ReduceDim::REDUCE_SCALAR
+
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/matmul.h"
 #include "api/compute/reduce.h"
