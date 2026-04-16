@@ -38,17 +38,15 @@
 
 #include <cstdint>
 
-// reduce.h requires these macros for default template parameters.
-// For batch-32 decode, rows 1-31 are zero-padded so REDUCE_SCALAR
-// gives the correct mean for the single active row.
+// moreh_common.hpp provides _with_dt wrappers that handle the mandatory
+// reconfig_data_format + pack_reconfig_data_format calls for fp32_dest_acc.
+// These are required when switching between operation types (mul → reduce →
+// add → rsqrt → bcast → binary_dest_reuse → matmul).
 #define REDUCE_OP PoolType::SUM
 #define REDUCE_DIM ReduceDim::REDUCE_SCALAR
 
-#include "api/compute/tile_move_copy.h"
+#include "ttnn/kernel/compute/moreh_common.hpp"
 #include "api/compute/matmul.h"
-#include "api/compute/reduce.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/eltwise_unary/rsqrt.h"
 #include "api/compute/bcast.h"
 #include "api/compute/pack.h"
 
@@ -88,14 +86,13 @@ void kernel_main() {
     for (uint32_t t = 0; t < Kt; ++t) {
         // Square: DST[0] = raw[t] * raw[t]  (element-wise)
         tile_regs_acquire();
-        mul_tiles_init(cb_raw, cb_raw);
+        mul_tiles_init_with_dt(cb_raw, cb_raw);
         mul_tiles(cb_raw, cb_raw, t, t, 0);
         tile_regs_commit();
 
         tile_regs_wait();
         cb_reserve_back(cb_sq, 1);
-        pack_reconfig_data_format(cb_sq);
-        pack_tile(0, cb_sq);
+        pack_tile_with_dt(0, cb_sq);
         cb_push_back(cb_sq, 1);
         tile_regs_release();
 
@@ -106,13 +103,12 @@ void kernel_main() {
             cb_wait_front(cb_sq, 1);
             cb_reserve_back(cb_sqsum, 1);
 
-            copy_tile_to_dst_init_short(cb_sq);
+            copy_tile_to_dst_init_short_with_dt(cb_sq);
             copy_tile(cb_sq, 0, 0);
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_reconfig_data_format(cb_sqsum);
-            pack_tile(0, cb_sqsum);
+            pack_tile_with_dt(0, cb_sqsum);
 
             cb_pop_front(cb_sq, 1);
             cb_push_back(cb_sqsum, 1);
@@ -124,13 +120,12 @@ void kernel_main() {
             cb_wait_front(cb_sq, 1);
             cb_reserve_back(cb_sqsum, 1);
 
-            add_tiles_init(cb_sqsum, cb_sq);
+            add_tiles_init_with_dt(cb_sqsum, cb_sq);
             add_tiles(cb_sqsum, cb_sq, 0, 0, 0);
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_reconfig_data_format(cb_sqsum);
-            pack_tile(0, cb_sqsum);
+            pack_tile_with_dt(0, cb_sqsum);
 
             cb_pop_front(cb_sqsum, 1);
             cb_pop_front(cb_sq, 1);
@@ -147,8 +142,8 @@ void kernel_main() {
         tile_regs_acquire();
         cb_wait_front(cb_sqsum, 1);
 
-        reduce_init<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sqsum, cb_scaler, cb_sqsum);
-        reduce_tile<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sqsum, cb_scaler, 0, 0, 0);
+        reduce_init_delta_with_dt(cb_sqsum, cb_sqsum, cb_scaler);
+        reduce_tile(cb_sqsum, cb_scaler, 0, 0, 0);
         reduce_uninit();
 
         // Pack mean scalar back to cb_sqsum (reuse).
@@ -157,8 +152,7 @@ void kernel_main() {
         tile_regs_commit();
 
         tile_regs_wait();
-        pack_reconfig_data_format(cb_sqsum);
-        pack_tile(0, cb_sqsum);
+        pack_tile_with_dt(0, cb_sqsum);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
@@ -169,8 +163,7 @@ void kernel_main() {
         tile_regs_acquire();
         cb_wait_front(cb_sqsum, 1);
 
-        reconfig_data_format(cb_sqsum, cb_eps);
-        add_tiles_init(cb_sqsum, cb_eps);
+        add_tiles_init_with_dt(cb_sqsum, cb_eps);
         add_tiles(cb_sqsum, cb_eps, 0, 0, 0);
 
         rsqrt_tile_init();
@@ -182,8 +175,7 @@ void kernel_main() {
         tile_regs_commit();
 
         tile_regs_wait();
-        pack_reconfig_data_format(cb_sqsum);
-        pack_tile(0, cb_sqsum);
+        pack_tile_with_dt(0, cb_sqsum);
         cb_push_back(cb_sqsum, 1);
         tile_regs_release();
     }
@@ -203,8 +195,7 @@ void kernel_main() {
         tile_regs_acquire();
 
         // DST[0] = raw[t] * rsqrt_scalar  (broadcast scalar multiply)
-        reconfig_data_format(cb_raw, cb_sqsum);
-        mul_tiles_bcast_scalar_init_short(cb_raw, cb_sqsum);
+        mul_tiles_bcast_scalar_init_short_with_dt(cb_raw, cb_sqsum);
         mul_tiles_bcast_scalar(cb_raw, cb_sqsum, t, 0, 0);
 
         // DST[0] *= gamma[t]  (element-wise, gamma in-place via dest reuse)
@@ -219,8 +210,7 @@ void kernel_main() {
         tile_regs_wait();
 
         cb_reserve_back(cb_in0, 1);
-        pack_reconfig_data_format(cb_in0);
-        pack_tile(0, cb_in0);
+        pack_tile_with_dt(0, cb_in0);
         cb_push_back(cb_in0, 1);
         tile_regs_release();
 
