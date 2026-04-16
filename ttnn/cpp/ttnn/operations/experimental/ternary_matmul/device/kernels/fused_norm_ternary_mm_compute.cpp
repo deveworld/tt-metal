@@ -103,7 +103,7 @@ void kernel_main() {
             cb_wait_front(cb_sq, 1);
             cb_reserve_back(cb_sqsum, 1);
 
-            copy_tile_to_dst_init_short_with_dt(cb_sq);
+            copy_tile_to_dst_init_short_with_dt(cb_sq, cb_sq);
             copy_tile(cb_sq, 0, 0);
             tile_regs_commit();
 
