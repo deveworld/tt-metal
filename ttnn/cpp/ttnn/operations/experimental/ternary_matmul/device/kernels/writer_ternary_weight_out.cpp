@@ -74,25 +74,22 @@ void kernel_main() {
     // The slot count is compile-time (Kt × nt_count), which lets the
     // compiler flatten both loops into straight-line stores.
     //
+    // Performance: the init is issued AFTER the first K-block's DMAs are
+    // kicked off on the NoC so the ~4 μs of L1 stores overlap with the
+    // ~30 μs DMA latency. DMA writes to bytes [64..319]; init writes to
+    // [0..63]; addresses don't overlap, so the ordering is safe. The init
+    // must complete before compute pulls any slot — the barrier after the
+    // first-block DMA waits for both DMA and (since L1 stores finish in
+    // program order on NCRISC) init.
+    //
     // An earlier "probe + skip if already 0x7F" optimisation was unsafe:
     // on Blackhole L1 can come up with bytes that already look like 0x7F
     // at the probe address, so the init was occasionally skipped while
     // other slots still held garbage exp bytes → NaN matmul output.
-    {
-        constexpr uint32_t cb1_num_slots = Kt * nt_count;
-        const uint32_t cb1_base = get_write_ptr(cb_in1);
-        for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
-            volatile tt_l1_ptr uint32_t* exp_ptr =
-                reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
-                    cb1_base + slot * BFP2_TILE_BYTES);
-            #pragma GCC unroll 16
-            for (uint32_t i = 0; i < BFP2_EXP_BYTES / 4; ++i) {
-                exp_ptr[i] = EXP_FILL_WORD;
-            }
-        }
-    }
 
     constexpr uint32_t num_k_blocks = Kt / in0_block_w;
+    constexpr uint32_t cb1_num_slots = Kt * nt_count;
+    const uint32_t cb1_base = get_write_ptr(cb_in1);
 
     // Phase 1: per-K-block weight reads, mirroring reader_ternary_mc.cpp.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
@@ -113,6 +110,22 @@ void kernel_main() {
                                    {.offset_bytes = offset});
                 }
             }
+
+            // Overlap the BFP2 exp init with the first K-block's DMA
+            // latency. Only run on the very first (mt, kb) iteration;
+            // subsequent blocks reuse the same exp bytes.
+            if (mt == 0 && kb == 0) {
+                for (uint32_t slot = 0; slot < cb1_num_slots; ++slot) {
+                    volatile tt_l1_ptr uint32_t* exp_ptr =
+                        reinterpret_cast<volatile tt_l1_ptr uint32_t*>(
+                            cb1_base + slot * BFP2_TILE_BYTES);
+                    #pragma GCC unroll 16
+                    for (uint32_t i = 0; i < BFP2_EXP_BYTES / 4; ++i) {
+                        exp_ptr[i] = EXP_FILL_WORD;
+                    }
+                }
+            }
+
             noc.async_read_barrier();
             cb1.push_back(in0_block_w * nt_count);
         }
