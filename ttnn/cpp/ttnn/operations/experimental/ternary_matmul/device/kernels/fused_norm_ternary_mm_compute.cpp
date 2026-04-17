@@ -160,28 +160,32 @@ void kernel_main() {
     cb_wait_front(cb_sqsum, 1);
 
     for (uint32_t t = 0; t < Kt; ++t) {
+        // Step 2a: normed = raw × rsqrt (bcast_cols), pack to temp cb_sq
         tile_regs_acquire();
-
-        // DST[0] = raw[t] * rsqrt  (broadcast column 0 across all columns)
         mul_bcast_cols_init_short_with_dt(cb_raw, cb_sqsum);
         mul_tiles_bcast_cols(cb_raw, cb_sqsum, t, 0, 0);
-
-        // DST[0] *= gamma[t]  (element-wise, gamma in-place via dest reuse)
-        cb_wait_front(cb_gamma, 1);
-        reconfig_data_format(cb_gamma, cb_gamma);
-        binary_dest_reuse_tiles_init<EltwiseBinaryType::ELWMUL,
-                                     EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_gamma);
-        binary_dest_reuse_tiles<EltwiseBinaryType::ELWMUL,
-                                EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_gamma, 0, 0);
-
         tile_regs_commit();
         tile_regs_wait();
+        cb_reserve_back(cb_sq, 1);
+        pack_tile_with_dt(0, cb_sq);
+        cb_push_back(cb_sq, 1);
+        tile_regs_release();
 
+        // Step 2b: result = normed × gamma (bcast_rows — gamma row 0
+        //          broadcast to all 32 rows for batch-32 decode)
+        tile_regs_acquire();
+        cb_wait_front(cb_sq, 1);
+        cb_wait_front(cb_gamma, 1);
+        mul_bcast_rows_init_short_with_dt(cb_sq, cb_gamma);
+        mul_tiles_bcast_rows(cb_sq, cb_gamma, 0, 0, 0);
+        tile_regs_commit();
+        tile_regs_wait();
         cb_reserve_back(cb_in0, 1);
         pack_tile_with_dt(0, cb_in0);
         cb_push_back(cb_in0, 1);
         tile_regs_release();
 
+        cb_pop_front(cb_sq, 1);
         cb_pop_front(cb_gamma, 1);
     }
 
