@@ -174,9 +174,13 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_2, act_df}})
                 .set_page_size(tt::CBIndex::c_2, act_tile_bytes));
 
-        // CB3 (gamma): 2 tiles double-buffered — reader streams, compute pops.
+        // CB3 (gamma): Kt tiles — reader issues all gamma DMAs in one
+        // batch with a single barrier (vs per-tile barriers), so compute
+        // Phase 2 never waits on per-tile reads. Memory cost is Kt ×
+        // bf16-tile bytes per core (~144 KB at Kt=72), well within L1
+        // headroom.
         CreateCircularBuffer(program, core_set,
-            CircularBufferConfig(2 * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
+            CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
                 .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
 
         // CB4 (sq scratch): 1 tile for squared tile during accumulation.

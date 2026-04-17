@@ -76,19 +76,28 @@ void kernel_main() {
         noc_semaphore_set(receiver_sem_ptr, INVALID);
         noc_semaphore_inc(sender_sem_noc_addr, 1);
 
+        // Kick off the gamma reads IN PARALLEL with the sender's mcast.
+        // Both go through the NoC; the receiver_sem wait below only
+        // ensures the activation mcast is done — it doesn't touch the
+        // gamma DMA stream. Issuing gamma here overlaps its latency with
+        // the activation mcast latency, and batching into one barrier
+        // saves Kt per-tile barriers that previously serialized Phase 2.
+        cb_gamma_buf.reserve_back(Kt);
+        const uint32_t gamma_base_wr_ptr = get_write_ptr(cb_gamma);
+        for (uint32_t kt = 0; kt < Kt; ++kt) {
+            uint64_t gamma_noc_addr = get_noc_addr(kt, gamma_tensor);
+            noc_async_read(
+                gamma_noc_addr,
+                gamma_base_wr_ptr + kt * gamma_page_bytes,
+                gamma_page_bytes);
+        }
+
         // Spin until sender's multicast sets our sem to VALID.
         noc_semaphore_wait(receiver_sem_ptr, VALID);
-
         cb_raw_buf.push_back(Kt);
 
-        // Read gamma tiles independently from DRAM (one at a time).
-        for (uint32_t kt = 0; kt < Kt; ++kt) {
-            cb_gamma_buf.reserve_back(1);
-            const uint32_t gamma_wr_ptr = get_write_ptr(cb_gamma);
-            uint64_t gamma_noc_addr = get_noc_addr(kt, gamma_tensor);
-            noc_async_read(gamma_noc_addr, gamma_wr_ptr, gamma_page_bytes);
-            noc_async_read_barrier();
-            cb_gamma_buf.push_back(1);
-        }
+        // Single barrier for the batched gamma reads.
+        noc_async_read_barrier();
+        cb_gamma_buf.push_back(Kt);
     }
 }

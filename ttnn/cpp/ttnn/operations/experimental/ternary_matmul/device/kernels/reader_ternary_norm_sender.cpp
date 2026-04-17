@@ -132,14 +132,19 @@ void kernel_main() {
 
         cb_raw_buf.push_back(Kt);
 
-        // Stream gamma tiles one at a time (compute pops each after use).
+        // Batch all Kt gamma reads into one barrier instead of Kt
+        // per-tile barriers (saves Kt × NoC-barrier latency on the
+        // critical path because compute Phase 2 pops one gamma per tile).
+        cb_gamma_buf.reserve_back(Kt);
+        const uint32_t gamma_base_wr_ptr = get_write_ptr(cb_gamma);
         for (uint32_t kt = 0; kt < Kt; ++kt) {
-            cb_gamma_buf.reserve_back(1);
-            const uint32_t gamma_wr_ptr = get_write_ptr(cb_gamma);
             uint64_t gamma_noc_addr = get_noc_addr(kt, gamma_tensor);
-            noc_async_read(gamma_noc_addr, gamma_wr_ptr, gamma_page_bytes);
-            noc_async_read_barrier();
-            cb_gamma_buf.push_back(1);
+            noc_async_read(
+                gamma_noc_addr,
+                gamma_base_wr_ptr + kt * gamma_page_bytes,
+                gamma_page_bytes);
         }
+        noc_async_read_barrier();
+        cb_gamma_buf.push_back(Kt);
     }
 }

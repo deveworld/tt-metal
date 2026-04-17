@@ -68,6 +68,13 @@ void kernel_main() {
     // The compute kernel needs all Kt tiles for the sum-of-squares
     // reduction (accessed by tile index). We read them all upfront.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
+        // Issue ALL activation reads AND ALL gamma reads concurrently,
+        // then wait once. Combining both DMA streams into a single barrier
+        // saves Kt per-tile barriers (each ~200 ns) — on the critical
+        // path because Phase 2 of the fused compute kernel pops one gamma
+        // tile per iteration. cb_gamma is sized Kt tiles (see program
+        // factory) so the single batched push keeps compute fed without
+        // per-tile waits.
         cb_raw_buf.reserve_back(Kt);
         for (uint32_t kt = 0; kt < Kt; ++kt) {
             uint32_t act_tile_id = mt * Kt + kt;
@@ -75,22 +82,16 @@ void kernel_main() {
                            {.page_id = act_tile_id},
                            {.offset_bytes = kt * act_page_bytes});
         }
-        noc.async_read_barrier();
-        cb_raw_buf.push_back(Kt);
 
-        // ============================================================
-        // Stream gamma tiles one at a time into cb_gamma
-        // ============================================================
-        // The compute kernel pops cb_gamma one tile per normalization
-        // step, so we push one tile at a time. The double-buffered CB
-        // (2 tiles) lets the DMA stay one tile ahead of compute.
+        cb_gamma_buf.reserve_back(Kt);
         for (uint32_t kt = 0; kt < Kt; ++kt) {
-            cb_gamma_buf.reserve_back(1);
             noc.async_read(gamma_tensor, cb_gamma_buf, gamma_page_bytes,
                            {.page_id = kt},
-                           {.offset_bytes = 0});
-            noc.async_read_barrier();
-            cb_gamma_buf.push_back(1);
+                           {.offset_bytes = kt * gamma_page_bytes});
         }
+
+        noc.async_read_barrier();
+        cb_raw_buf.push_back(Kt);
+        cb_gamma_buf.push_back(Kt);
     }
 }
