@@ -109,7 +109,12 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // Prefer multicast only when rectangular layout doesn't sacrifice cores.
-    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 2);
+    // When fuse_norm is requested, skip mcast: the fused reader has each core
+    // independently read the small activation (Kt tiles ≈ 144 KB for K=2304)
+    // from DRAM and stream gamma.  This is simpler than a fused mcast sender
+    // and costs only ~20 μs of extra DRAM bandwidth for batch-32 decode.
+    bool fuse_norm_requested = inputs.norm_weight.has_value() && params.norm_epsilon.has_value();
+    bool use_mcast = !fuse_norm_requested && (rect_cores >= lshape_cores) && (rect_cores >= 2);
     uint32_t num_cores = use_mcast ? rect_cores : lshape_cores;
     uint32_t nt_per_core = Nt / num_cores;
 
