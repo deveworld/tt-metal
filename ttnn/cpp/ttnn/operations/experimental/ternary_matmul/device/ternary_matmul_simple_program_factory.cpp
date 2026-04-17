@@ -109,12 +109,7 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
     }
 
     // Prefer multicast only when rectangular layout doesn't sacrifice cores.
-    // When fuse_norm is requested, skip mcast: the fused reader has each core
-    // independently read the small activation (Kt tiles ≈ 144 KB for K=2304)
-    // from DRAM and stream gamma.  This is simpler than a fused mcast sender
-    // and costs only ~20 μs of extra DRAM bandwidth for batch-32 decode.
-    bool fuse_norm_requested = inputs.norm_weight.has_value() && params.norm_epsilon.has_value();
-    bool use_mcast = !fuse_norm_requested && (rect_cores >= lshape_cores) && (rect_cores >= 2);
+    bool use_mcast = (rect_cores >= lshape_cores) && (rect_cores >= 2);
     uint32_t num_cores = use_mcast ? rect_cores : lshape_cores;
     uint32_t nt_per_core = Nt / num_cores;
 
@@ -300,16 +295,40 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             auto act_ct = act_accessor.get_compile_time_args();
             sender_ct_args.insert(sender_ct_args.end(), act_ct.begin(), act_ct.end());
         }
+        if (fuse_norm) {
+            auto gamma_accessor = TensorAccessorArgs(*inputs.norm_weight->buffer());
+            auto gamma_ct = gamma_accessor.get_compile_time_args();
+            sender_ct_args.insert(sender_ct_args.end(), gamma_ct.begin(), gamma_ct.end());
+        }
+
+        std::string sender_path = fuse_norm
+            ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_norm_sender.cpp"
+            : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_sender.cpp";
+
         CoreRangeSet sender_set(std::set<CoreRange>{CoreRange{{0, 0}, {0, 0}}});
         sender_id = CreateKernel(
             program,
-            "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_sender.cpp",
+            sender_path,
             sender_set,
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = NOC::RISCV_0_default,
                 .compile_args = sender_ct_args});
-        SetCommonRuntimeArgs(program, sender_id, {activation.buffer()->address()});
+
+        if (fuse_norm) {
+            float inv_K = 1.0f / static_cast<float>(K);
+            float eps = params.norm_epsilon.value();
+            uint32_t inv_K_u32, eps_u32;
+            std::memcpy(&inv_K_u32, &inv_K, sizeof(uint32_t));
+            std::memcpy(&eps_u32, &eps, sizeof(uint32_t));
+            SetCommonRuntimeArgs(program, sender_id, {
+                activation.buffer()->address(),
+                inputs.norm_weight->buffer()->address(),
+                inv_K_u32,
+                eps_u32});
+        } else {
+            SetCommonRuntimeArgs(program, sender_id, {activation.buffer()->address()});
+        }
 
         // Receiver kernel (all cores except (0,0)).
         if (num_mcast_dests > 0) {
@@ -320,6 +339,15 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
                 static_cast<uint32_t>(sender_phys.x),
                 static_cast<uint32_t>(sender_phys.y),
                 sender_sem_id, receiver_sem_id};
+            if (fuse_norm) {
+                auto gamma_accessor = TensorAccessorArgs(*inputs.norm_weight->buffer());
+                auto gamma_ct = gamma_accessor.get_compile_time_args();
+                recv_ct_args.insert(recv_ct_args.end(), gamma_ct.begin(), gamma_ct.end());
+            }
+
+            std::string recv_path = fuse_norm
+                ? "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_norm_receiver.cpp"
+                : "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_receiver.cpp";
 
             // All cores except (0,0). Use individual ranges so we don't
             // accidentally include the sender.
@@ -330,12 +358,24 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
             CoreRangeSet recv_set(recv_ranges);
             receiver_id = CreateKernel(
                 program,
-                "ttnn/cpp/ttnn/operations/experimental/ternary_matmul/device/kernels/reader_ternary_act_receiver.cpp",
+                recv_path,
                 recv_set,
                 DataMovementConfig{
                     .processor = DataMovementProcessor::RISCV_0,
                     .noc = NOC::RISCV_0_default,
                     .compile_args = recv_ct_args});
+
+            if (fuse_norm) {
+                float inv_K = 1.0f / static_cast<float>(K);
+                float eps = params.norm_epsilon.value();
+                uint32_t inv_K_u32, eps_u32;
+                std::memcpy(&inv_K_u32, &inv_K, sizeof(uint32_t));
+                std::memcpy(&eps_u32, &eps, sizeof(uint32_t));
+                SetCommonRuntimeArgs(program, receiver_id, {
+                    inputs.norm_weight->buffer()->address(),
+                    inv_K_u32,
+                    eps_u32});
+            }
         }
     }
 
@@ -418,8 +458,14 @@ void TernaryMatmulSimpleProgramFactory::override_runtime_arguments(
     if (shared.use_mcast) {
         auto& sender_common = GetCommonRuntimeArgs(program, shared.sender_kernel_id);
         sender_common[0] = inputs.input_tensor.buffer()->address();
-        // Receiver kernel has no common args — activation never goes through
-        // it directly.
+        if (shared.fuse_norm && inputs.norm_weight.has_value()) {
+            sender_common[1] = inputs.norm_weight->buffer()->address();
+            // Receiver also needs gamma address update.
+            if (shared.receiver_kernel_id != 0) {
+                auto& recv_common = GetCommonRuntimeArgs(program, shared.receiver_kernel_id);
+                recv_common[0] = inputs.norm_weight->buffer()->address();
+            }
+        }
     } else {
         auto& reader_common = GetCommonRuntimeArgs(program, shared.reader_kernel_id);
         reader_common[0] = inputs.input_tensor.buffer()->address();
