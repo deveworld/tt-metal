@@ -175,10 +175,12 @@ TernaryMatmulSimpleProgramFactory::cached_program_t TernaryMatmulSimpleProgramFa
                 .set_page_size(tt::CBIndex::c_2, act_tile_bytes));
 
         // CB3 (gamma): Kt tiles — reader issues all gamma DMAs in one
-        // batch with a single barrier (vs per-tile barriers), so compute
-        // Phase 2 never waits on per-tile reads. Memory cost is Kt ×
-        // bf16-tile bytes per core (~144 KB at Kt=72), well within L1
-        // headroom.
+        // batch with a single barrier, so compute Phase 2 never waits
+        // on per-tile reads. Memory cost is Kt × bf16-tile bytes per
+        // core (~144 KB at Kt=72). Callers using Kt large enough to
+        // overflow L1 with this + cb_raw + cb_in0 should not request
+        // fused norm — the Python layer gates on Kt ≤ 128 for the only
+        // large-K matmul (down_proj).
         CreateCircularBuffer(program, core_set,
             CircularBufferConfig(Kt * act_tile_bytes, {{tt::CBIndex::c_3, act_df}})
                 .set_page_size(tt::CBIndex::c_3, act_tile_bytes));
