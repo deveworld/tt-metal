@@ -84,44 +84,34 @@ void kernel_main() {
     cb_wait_front(cb_eps, 1);
 
     // Step 1a: Square each tile and accumulate element-wise into cb_sqsum.
+    // One acquire/release cycle per tile: square into DST[0], then add the
+    // running sum (via DEST_TO_SRCA dest-reuse) to DST[0] — eliminates the
+    // old per-iteration pack→L1→unpack round-trip through cb_sq.
     for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
-        cb_reserve_back(cb_sq, 1);
+
+        // DST[0] = cb_raw[t]^2
         mul_tiles_init_with_dt(cb_raw, cb_raw);
         mul_tiles(cb_raw, cb_raw, t, t, 0);
+
+        if (t > 0) {
+            // DST[0] += cb_sqsum[0]  (running sum from previous iterations)
+            cb_wait_front(cb_sqsum, 1);
+            reconfig_data_format(cb_sqsum, cb_sqsum);
+            binary_dest_reuse_tiles_init<EltwiseBinaryType::ELWADD,
+                                         EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_sqsum);
+            binary_dest_reuse_tiles<EltwiseBinaryType::ELWADD,
+                                    EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_sqsum, 0, 0);
+        }
+
         tile_regs_commit();
         tile_regs_wait();
-        pack_tile_with_dt(0, cb_sq);
-        cb_push_back(cb_sq, 1);
-        tile_regs_release();
 
-        if (t == 0) {
-            tile_regs_acquire();
-            cb_wait_front(cb_sq, 1);
-            cb_reserve_back(cb_sqsum, 1);
-            copy_tile_to_dst_init_short_with_dt(cb_sq, cb_sq);
-            copy_tile(cb_sq, 0, 0);
-            tile_regs_commit();
-            tile_regs_wait();
-            pack_tile_with_dt(0, cb_sqsum);
-            cb_pop_front(cb_sq, 1);
-            cb_push_back(cb_sqsum, 1);
-            tile_regs_release();
-        } else {
-            tile_regs_acquire();
-            cb_wait_front(cb_sqsum, 1);
-            cb_wait_front(cb_sq, 1);
-            cb_reserve_back(cb_sqsum, 1);
-            add_tiles_init_with_dt(cb_sqsum, cb_sq);
-            add_tiles(cb_sqsum, cb_sq, 0, 0, 0);
-            tile_regs_commit();
-            tile_regs_wait();
-            pack_tile_with_dt(0, cb_sqsum);
-            cb_pop_front(cb_sqsum, 1);
-            cb_pop_front(cb_sq, 1);
-            cb_push_back(cb_sqsum, 1);
-            tile_regs_release();
-        }
+        if (t > 0) cb_pop_front(cb_sqsum, 1);
+        cb_reserve_back(cb_sqsum, 1);
+        pack_tile_with_dt(0, cb_sqsum);
+        cb_push_back(cb_sqsum, 1);
+        tile_regs_release();
     }
 
     // Step 1b: REDUCE_ROW — sum columns per row, multiply by 1/K scaler.
