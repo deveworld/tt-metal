@@ -6,10 +6,10 @@
 //
 // Phase 1 (RMSNorm reduction):
 //   Square each activation tile, accumulate element-wise across Kt tiles,
-//   reduce to scalar, multiply by 1/K scaler → mean(x²), add eps, rsqrt.
+//   REDUCE_ROW to column vector (per-row mean), add eps, rsqrt.
 //
 // Phase 2 (Normalize + gamma):
-//   For each tile: multiply raw activation by the rsqrt scalar (broadcast),
+//   For each tile: multiply raw activation by rsqrt column (bcast_cols),
 //   then multiply by gamma. Pack normed tiles to cb_in0 for the matmul.
 //
 // Phase 3 (Matmul):
@@ -43,7 +43,7 @@
 // These are required when switching between operation types (mul → reduce →
 // add → rsqrt → bcast → binary_dest_reuse → matmul).
 #define REDUCE_OP PoolType::SUM
-#define REDUCE_DIM ReduceDim::REDUCE_SCALAR
+#define REDUCE_DIM ReduceDim::REDUCE_ROW
 
 #include "ttnn/kernel/compute/moreh_common.hpp"
 #include "api/compute/matmul.h"
@@ -124,44 +124,13 @@ void kernel_main() {
         }
     }
 
-    // Step 1b: Reduce to scalar (sum of all elements × scaler).
-    // Note: we pass cb_scaler as the scaler CB but on Blackhole the scaler
-    // is applied during reduction. The result in cb_sq = mean(x²).
-    reduce_tile_to_cb(cb_sqsum, cb_scaler, cb_sq, 1);
+    // Step 1b: REDUCE_ROW — sum columns per row, multiply by 1/K scaler.
+    // Result in cb_sq: column 0 = mean(x²) per row; other columns = 0.
+    reduce_tile_to_cb(cb_sqsum, cb_scaler, cb_sq, 1, /*pop0=*/1, /*pop1=*/0);
 
-    // Step 1c: Add epsilon, compute rsqrt, multiply by 1/K if needed.
-    // reduce_tile on BH may or may not apply the scaler. To be safe, we
-    // divide by K explicitly: rsqrt(sum/K + eps) = sqrt(K) * rsqrt(sum + K*eps).
-    // Instead: rsqrt(reduce_result + eps). If reduce applied 1/K, this is
-    // rsqrt(mean + eps). If not, it's rsqrt(sum + eps) which is wrong.
-    //
-    // Empirically, reduce_tile on BH DOES apply the scaler (result=mean).
-    // The 8x error was from earlier bugs. The current 8x is because
-    // reduce_tile gives mean=1/K (not mean=1.0), suggesting it does NOT
-    // apply scaler but the scaler IS read into SrcB and affect the result.
-    //
-    // Pragmatic fix: use eps_tile filled with K*eps instead of eps.
-    // Then rsqrt(sum + K*eps) = rsqrt(K*(sum/K + eps)) = rsqrt(K * mean_with_eps)
-    // = (1/sqrt(K)) * rsqrt(mean + eps).
-    // We need to compensate by multiplying gamma by sqrt(K) on the host.
-    //
-    // OR: just add eps and rsqrt normally, then adjust gamma by sqrt(K).
-    // This requires gamma' = sqrt(K) * gamma (pre-computed on host).
-    //
-    // For now: assume reduce gives raw sum (not mean).
-    // rsqrt(sum + eps): wrong scale.
-    // To get correct RMSNorm: multiply by sqrt(1/K) after rsqrt.
-    // 1/RMS = rsqrt(mean + eps) = rsqrt(sum/K + eps)
-    //       = sqrt(K/(sum + K*eps))
-    //       = sqrt(K) * rsqrt(sum + K*eps)
-    //       = sqrt(K) * our_rsqrt (if eps_tile = K*eps)
-    //
-    // Simplest: change eps in reader to K*eps, then host gamma *= sqrt(K).
-    // BUT: this requires host changes. For now, add eps normally and
-    // accept the wrong scale. Fix with sqrt(K) compensation.
-
-    // cb_sq now has mean(x²) (reduce applied 1/K scaler).
-    // Add eps and rsqrt.
+    // Step 1c: Add epsilon and compute rsqrt.
+    // Column 0: rsqrt(mean(x²) + eps) = 1/RMS per row.
+    // Other columns: rsqrt(eps) — ignored by bcast_cols in Phase 2.
     {
         tile_regs_acquire();
         cb_wait_front(cb_sq, 1);
@@ -182,10 +151,10 @@ void kernel_main() {
         tile_regs_release();
     }
 
-    // cb_sqsum now has rsqrt(mean(x²) + eps).
+    // cb_sqsum now has rsqrt column vector (col 0 = 1/RMS per row).
 
     // ==================================================================
-    // Phase 2: Normalize — raw[t] * rsqrt_scalar * gamma[t] → cb_in0
+    // Phase 2: Normalize — raw[t] * rsqrt_col (bcast) * gamma[t] → cb_in0
     // ==================================================================
 
     cb_wait_front(cb_sqsum, 1);
@@ -193,9 +162,9 @@ void kernel_main() {
     for (uint32_t t = 0; t < Kt; ++t) {
         tile_regs_acquire();
 
-        // DST[0] = raw[t] * rsqrt_scalar  (broadcast scalar multiply)
-        mul_tiles_bcast_scalar_init_short_with_dt(cb_raw, cb_sqsum);
-        mul_tiles_bcast_scalar(cb_raw, cb_sqsum, t, 0, 0);
+        // DST[0] = raw[t] * rsqrt  (broadcast column 0 across all columns)
+        mul_bcast_cols_init_short_with_dt(cb_raw, cb_sqsum);
+        mul_tiles_bcast_cols(cb_raw, cb_sqsum, t, 0, 0);
 
         // DST[0] *= gamma[t]  (element-wise, gamma in-place via dest reuse)
         cb_wait_front(cb_gamma, 1);
